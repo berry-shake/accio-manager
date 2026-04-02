@@ -1,0 +1,9 @@
+{
+  "publicBaseUrl": "",
+  "upstreamProxyUrl": "",
+  "autoDisableOnEmptyQuota": true,
+  "autoEnableOnRecoveredQuota": true,
+  "apiAccountStrategy": "fill",
+  "adminPassword": "change-me",
+  "sessionSecret": "replace-with-a-random-secret"
+}

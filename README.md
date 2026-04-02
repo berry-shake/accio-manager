@@ -45,6 +45,18 @@ admin
 
 可在 `data/config.json` 或面板内配置区中修改。
 
+仓库默认只保留示例配置，不提交真实运行数据：
+
+- `data/config.json`
+- `data/stats.json`
+- `data/accounts/*.json`
+- `.env`
+
+示例文件：
+
+- `data/config.example.json`
+- `.env.example`
+
 Anthropic 兼容 API 调用时：
 
 - 使用 `x-api-key` 或 `Authorization: Bearer`

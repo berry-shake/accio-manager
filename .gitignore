@@ -10,5 +10,12 @@ wheels/
 .venv
 .ace-tool/
 
-# Local account secrets
-data/
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime data and secrets
+data/*.json
+!data/*.example.json
+data/accounts/*.json
