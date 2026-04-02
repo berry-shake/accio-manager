@@ -138,21 +138,20 @@
   <main class="shell">
     <section class="hero">
       <h1>Accio 多账号管理面板</h1>
-      <p>管理操作需要管理员密码。打开登录页、复制登录链接和登录成功回调仍然可以直接使用。</p>
+      <p>管理操作需要管理员密码。OAuth 登录、复制登录链接和手动导入回调地址，已经单独拆到了独立页面。</p>
     </section>
 
     <section class="card">
       <label class="label" for="admin-password">管理员密码</label>
       <input id="admin-password" class="input" type="password" placeholder="请输入管理员密码">
       <div class="hint">
-        当前回调地址：{{ callback_url }}<br>
-        登录入口：{{ login_url }}
+        本地回调地址：{{ callback_url }}<br>
+        OAuth 页面：{{ oauth_url }}
       </div>
 
       <div class="actions">
         <button class="button primary" type="button" onclick="loginAdmin()">登录面板</button>
-        <a class="link-button secondary" href="/login" target="_blank" rel="noreferrer">打开登录页</a>
-        <button class="button secondary" type="button" onclick="copyLoginLink()">复制登录链接</button>
+        <a class="link-button secondary" href="{{ oauth_url }}" target="_blank" rel="noreferrer">打开 OAuth 页面</a>
       </div>
     </section>
   </main>
@@ -178,22 +177,6 @@
       } catch (error) {
         console.error(error);
         showToast('登录失败，请稍后重试');
-      }
-    }
-
-    async function copyLoginLink() {
-      try {
-        const response = await fetch('/api/login-link');
-        const payload = await response.json();
-        if (!payload.success) {
-          showToast(payload.message || '获取登录链接失败');
-          return;
-        }
-        await navigator.clipboard.writeText(payload.url);
-        showToast('登录链接已复制到剪贴板');
-      } catch (error) {
-        console.error(error);
-        showToast('复制失败，请直接打开登录页');
       }
     }
 

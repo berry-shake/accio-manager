@@ -1,5 +1,4 @@
 {
-  "publicBaseUrl": "",
   "upstreamProxyUrl": "",
   "autoDisableOnEmptyQuota": true,
   "autoEnableOnRecoveredQuota": true,

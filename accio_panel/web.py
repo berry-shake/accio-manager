@@ -9,6 +9,7 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlparse
 
 import requests
 import uvicorn
@@ -27,7 +28,6 @@ from .app_settings import (
     PanelSettings,
     PanelSettingsStore,
     normalize_api_account_strategy,
-    normalize_public_base_url,
     normalize_upstream_proxy_url,
 )
 from .anthropic_proxy import (
@@ -75,16 +75,75 @@ def _local_base_url(settings: Settings) -> str:
     return f"http://{settings.callback_host}:{settings.callback_port}"
 
 
+def _request_base_url(request: Request, settings: Settings) -> str:
+    forwarded_proto = str(request.headers.get("x-forwarded-proto") or "").strip()
+    forwarded_host = str(request.headers.get("x-forwarded-host") or "").strip()
+    host = forwarded_host or str(request.headers.get("host") or "").strip()
+    if forwarded_proto and host:
+        return f"{forwarded_proto}://{host}"
+    base_url = str(request.base_url).rstrip("/")
+    return base_url or _local_base_url(settings)
+
+
 def _is_admin_authenticated(request: Request) -> bool:
     return bool(request.session.get("admin_authenticated"))
 
 
 def _effective_callback_url(settings: Settings, panel_settings: PanelSettings) -> str:
-    return panel_settings.effective_callback_url(_local_base_url(settings))
+    return settings.callback_url
 
 
 def _effective_api_base_url(settings: Settings, panel_settings: PanelSettings) -> str:
-    return panel_settings.effective_base_url(_local_base_url(settings))
+    return _local_base_url(settings)
+
+
+def _parse_callback_payload(callback_value: str) -> dict[str, str]:
+    raw_value = str(callback_value or "").strip()
+    if not raw_value:
+        raise ValueError("请输入完整的回调地址。")
+
+    query = raw_value
+    if "?" in raw_value:
+        query = raw_value.split("?", 1)[1]
+    elif raw_value.startswith("http://") or raw_value.startswith("https://"):
+        parsed = urlparse(raw_value)
+        query = parsed.query
+
+    if not query:
+        raise ValueError("回调地址中缺少查询参数。")
+
+    params = {
+        key: value
+        for key, value in parse_qsl(query.lstrip("?"), keep_blank_values=True)
+    }
+    if not params.get("accessToken") or not params.get("refreshToken"):
+        raise ValueError("回调地址缺少 accessToken 或 refreshToken。")
+    return params
+
+
+def _import_callback_account(
+    store: AccountStore,
+    client: AccioClient,
+    panel_settings: PanelSettings,
+    *,
+    access_token: str,
+    refresh_token: str,
+    expires_at: str | int | None,
+    cookie: str | None,
+) -> tuple[Account, dict[str, Any], bool]:
+    account, created = store.upsert_from_callback(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=expires_at,
+        cookie=cookie,
+    )
+    account, quota = _apply_quota_result(
+        store,
+        account,
+        _query_quota(client, account, panel_settings),
+        panel_settings,
+    )
+    return account, quota, created
 
 
 def _now_timestamp() -> int:
@@ -585,7 +644,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 context={
                     "page_title": "Accio 多账号管理面板",
                     "callback_url": callback_url,
-                    "login_url": client.build_login_url(callback_url),
+                    "oauth_url": "/oauth",
                 },
             )
 
@@ -608,7 +667,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             store,
             panel_settings,
         )
-        api_base_url = _effective_api_base_url(settings, panel_settings)
+        api_base_url = _request_base_url(request, settings)
         return TEMPLATES.TemplateResponse(
             request=request,
             name="dashboard.html",
@@ -617,8 +676,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "accounts": dashboard_items,
                 "account_count": account_count,
                 "callback_url": callback_url,
-                "login_url": client.build_login_url(callback_url),
-                "public_base_url": panel_settings.public_base_url,
+                "oauth_url": "/oauth",
                 "upstream_proxy_url": panel_settings.upstream_proxy_url,
                 "version": settings.version,
                 "base_url": settings.base_url,
@@ -665,6 +723,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request.session.clear()
         return JSONResponse({"success": True, "message": "已退出登录"})
 
+    @application.get("/oauth", response_class=HTMLResponse)
+    def oauth_page(request: Request) -> HTMLResponse:
+        panel_settings = panel_settings_store.load()
+        callback_url = _effective_callback_url(settings, panel_settings)
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="oauth.html",
+            context={
+                "page_title": "Accio OAuth 登录",
+                "callback_url": callback_url,
+                "login_url": client.build_login_url(callback_url),
+                "dashboard_url": "/dashboard",
+            },
+        )
+
     @application.get("/login")
     def login_redirect() -> RedirectResponse:
         panel_settings = panel_settings_store.load()
@@ -680,6 +753,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "success": True,
                 "url": client.build_login_url(callback_url),
                 "callbackUrl": callback_url,
+            }
+        )
+
+    @application.post("/api/oauth/import-callback")
+    def import_callback_url(
+        payload: dict[str, Any] = Body(...),
+    ) -> JSONResponse:
+        callback_url = str(payload.get("callbackUrl") or "").strip()
+        try:
+            callback_payload = _parse_callback_payload(callback_url)
+        except ValueError as exc:
+            return JSONResponse(
+                {"success": False, "message": str(exc)},
+                status_code=400,
+            )
+
+        panel_settings = panel_settings_store.load()
+        account, quota, created = _import_callback_account(
+            store,
+            client,
+            panel_settings,
+            access_token=callback_payload.get("accessToken", ""),
+            refresh_token=callback_payload.get("refreshToken", ""),
+            expires_at=callback_payload.get("expiresAt"),
+            cookie=callback_payload.get("cookie"),
+        )
+        return JSONResponse(
+            {
+                "success": True,
+                "message": "账号已导入到面板。" if created else "账号已存在，Token 已更新。",
+                "account": {
+                    "id": account.id,
+                    "name": account.name,
+                    "utdid": account.utdid,
+                    "accessToken": mask_token(account.access_token),
+                    "expiresAtText": format_timestamp(account.expires_at),
+                    "addedAt": account.added_at,
+                },
+                "quota": quota,
             }
         )
 
@@ -851,7 +963,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _unauthorized_json()
 
         current_settings = panel_settings_store.load()
-        public_base_url = str(payload.get("publicBaseUrl") or "").strip()
         upstream_proxy_url = str(payload.get("upstreamProxyUrl") or "").strip()
         auto_disable_on_empty_quota = bool(
             payload.get("autoDisableOnEmptyQuota", True)
@@ -865,7 +976,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         admin_password = str(payload.get("adminPassword") or "").strip()
 
         try:
-            normalized_public_base_url = normalize_public_base_url(public_base_url)
             normalized_upstream_proxy_url = normalize_upstream_proxy_url(upstream_proxy_url)
         except ValueError as exc:
             return JSONResponse(
@@ -875,7 +985,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         panel_settings = panel_settings_store.save(
             PanelSettings(
-                public_base_url=normalized_public_base_url,
                 upstream_proxy_url=normalized_upstream_proxy_url,
                 auto_disable_on_empty_quota=auto_disable_on_empty_quota,
                 auto_enable_on_recovered_quota=auto_enable_on_recovered_quota,
@@ -890,7 +999,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "success": True,
                 "message": "设置已保存",
                 "settings": panel_settings.to_dict(),
-                "callbackUrl": _effective_callback_url(settings, panel_settings),
             }
         )
 
@@ -946,19 +1054,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 },
             )
 
-        # 登录回调优先做 upsert，避免同一账号重复写入本地列表。
-        account, created = store.upsert_from_callback(
+        panel_settings = panel_settings_store.load()
+        account, quota, created = _import_callback_account(
+            store,
+            client,
+            panel_settings,
             access_token=accessToken,
             refresh_token=refreshToken,
             expires_at=expiresAt,
             cookie=cookie,
-        )
-        panel_settings = panel_settings_store.load()
-        account, quota = _apply_quota_result(
-            store,
-            account,
-            _query_quota(client, account, panel_settings),
-            panel_settings,
         )
 
         return TEMPLATES.TemplateResponse(
@@ -1491,10 +1595,6 @@ def run() -> None:
     settings: Settings = app.state.settings
     panel_settings_store: PanelSettingsStore = app.state.panel_settings_store
     panel_settings = panel_settings_store.load()
-    effective_callback_url = _effective_callback_url(
-        settings,
-        panel_settings,
-    )
     effective_api_base_url = _effective_api_base_url(
         settings,
         panel_settings,
@@ -1504,8 +1604,8 @@ def run() -> None:
     print(" Accio 多账号管理面板")
     print("=" * 56)
     print(f"管理面板: http://{settings.callback_host}:{settings.callback_port}/dashboard")
+    print(f"OAuth 页面: http://{settings.callback_host}:{settings.callback_port}/oauth")
     print(f"本地回调: {settings.callback_url}")
-    print(f"当前回调: {effective_callback_url}")
     print(f"Anthropic API: {effective_api_base_url}/v1/messages")
     print(f"模型列表: {effective_api_base_url}/v1/models")
     print(f"API 调度: {_api_account_strategy_label(panel_settings.api_account_strategy)}")

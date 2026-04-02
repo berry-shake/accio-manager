@@ -7,7 +7,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-CALLBACK_PATH = "/auth/callback"
 DEFAULT_ADMIN_PASSWORD = "admin"
 DEFAULT_API_ACCOUNT_STRATEGY = "fill"
 API_ACCOUNT_STRATEGIES = {"fill", "round_robin"}
@@ -44,7 +43,6 @@ def normalize_upstream_proxy_url(value: object) -> str:
 
 @dataclass(slots=True)
 class PanelSettings:
-    public_base_url: str = ""
     upstream_proxy_url: str = ""
     auto_disable_on_empty_quota: bool = True
     auto_enable_on_recovered_quota: bool = True
@@ -55,7 +53,6 @@ class PanelSettings:
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "PanelSettings":
         return cls(
-            public_base_url=str(data.get("publicBaseUrl") or "").strip(),
             upstream_proxy_url=str(data.get("upstreamProxyUrl") or "").strip(),
             auto_disable_on_empty_quota=bool(
                 data.get("autoDisableOnEmptyQuota", True)
@@ -73,7 +70,6 @@ class PanelSettings:
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         return {
-            "publicBaseUrl": payload["public_base_url"],
             "upstreamProxyUrl": payload["upstream_proxy_url"],
             "autoDisableOnEmptyQuota": payload["auto_disable_on_empty_quota"],
             "autoEnableOnRecoveredQuota": payload["auto_enable_on_recovered_quota"],
@@ -81,27 +77,6 @@ class PanelSettings:
             "adminPassword": payload["admin_password"],
             "sessionSecret": payload["session_secret"],
         }
-
-    def effective_base_url(self, local_base_url: str) -> str:
-        return self.public_base_url or local_base_url
-
-    def effective_callback_url(self, local_base_url: str) -> str:
-        return f"{self.effective_base_url(local_base_url)}{CALLBACK_PATH}"
-
-
-def normalize_public_base_url(value: str) -> str:
-    normalized = value.strip().rstrip("/")
-    if not normalized:
-        return ""
-
-    parsed = urlparse(normalized)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("公开回调地址必须以 http:// 或 https:// 开头")
-
-    if parsed.path.endswith(CALLBACK_PATH):
-        normalized = normalized[: -len(CALLBACK_PATH)]
-
-    return normalized.rstrip("/")
 
 
 class PanelSettingsStore:

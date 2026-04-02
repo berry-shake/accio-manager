@@ -134,22 +134,7 @@
   <main class="shell">
     <section class="card">
       <h1>配置中心</h1>
-      <p>在这里配置登录回调地址，以及账号额度耗尽后的自动禁用/恢复策略。</p>
-
-      <div class="group">
-        <label class="label" for="public-base-url">公开回调基础地址</label>
-        <input
-          id="public-base-url"
-          class="input"
-          type="text"
-          value="{{ panel_settings.public_base_url }}"
-          placeholder="例如 https://your-domain.com"
-        >
-        <div class="hint">
-          留空时默认使用本地地址：{{ local_base_url }}<br>
-          当前实际回调地址：<strong id="effective-callback">{{ effective_callback_url }}</strong>
-        </div>
-      </div>
+      <p>在这里配置上游代理、自动禁用 / 自动恢复，以及 API 调度策略。</p>
 
       <div class="group">
         <div class="check">
@@ -178,7 +163,6 @@
 
   <script>
     async function saveSettings() {
-      const publicBaseUrl = document.getElementById('public-base-url').value.trim();
       const autoDisableOnEmptyQuota = document.getElementById('auto-disable').checked;
       const autoEnableOnRecoveredQuota = document.getElementById('auto-enable').checked;
 
@@ -189,17 +173,12 @@
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            publicBaseUrl,
             autoDisableOnEmptyQuota,
             autoEnableOnRecoveredQuota
           })
         });
         const payload = await response.json();
         window.alert(payload.message || '设置已保存');
-        if (payload.success) {
-          document.getElementById('effective-callback').textContent = payload.callbackUrl;
-          document.getElementById('public-base-url').value = payload.settings.publicBaseUrl || '';
-        }
       } catch (error) {
         console.error(error);
         window.alert('保存失败，请稍后重试');

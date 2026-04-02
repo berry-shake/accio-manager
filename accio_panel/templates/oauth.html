@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page_title }}</title>
+  <style>
+    :root {
+      --bg: #eef3f8;
+      --text: #14324a;
+      --muted: #5b7287;
+      --brand: #1967d2;
+      --brand-deep: #103d78;
+      --success: #178a55;
+      --shadow: 0 24px 60px rgba(23, 42, 58, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(37, 111, 255, 0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(24, 128, 92, 0.14), transparent 24%),
+        linear-gradient(180deg, #f7fbff 0%, var(--bg) 100%);
+    }
+
+    .shell {
+      width: min(1080px, calc(100% - 32px));
+      margin: 30px auto 40px;
+    }
+
+    .hero {
+      padding: 28px;
+      border-radius: 28px;
+      background: linear-gradient(135deg, rgba(16, 86, 170, 0.96), rgba(18, 55, 88, 0.92));
+      box-shadow: var(--shadow);
+      color: #fff;
+    }
+
+    .hero h1 {
+      margin: 0 0 10px;
+      font-size: clamp(30px, 4vw, 44px);
+      line-height: 1.05;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 760px;
+      color: rgba(255, 255, 255, 0.8);
+      line-height: 1.7;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 18px;
+      margin-top: 22px;
+    }
+
+    .card {
+      padding: 24px;
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      box-shadow: var(--shadow);
+    }
+
+    .card h2 {
+      margin: 0 0 12px;
+      font-size: 22px;
+    }
+
+    .hint {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    .meta-block {
+      margin-top: 18px;
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: #f5f9fd;
+      border: 1px solid rgba(20, 50, 74, 0.08);
+      line-height: 1.8;
+      word-break: break-all;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .button, .link-button {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      transition: transform 0.18s ease, box-shadow 0.18s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .button:hover, .link-button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 26px rgba(20, 50, 74, 0.12);
+    }
+
+    .primary {
+      background: var(--brand);
+      color: #fff;
+    }
+
+    .secondary {
+      background: rgba(16, 61, 120, 0.08);
+      color: var(--brand-deep);
+    }
+
+    .success {
+      background: rgba(23, 138, 85, 0.1);
+      color: var(--success);
+    }
+
+    .label {
+      display: block;
+      margin: 18px 0 8px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 180px;
+      resize: vertical;
+      border-radius: 18px;
+      border: 1px solid rgba(20, 50, 74, 0.14);
+      padding: 14px 16px;
+      font: inherit;
+      color: var(--text);
+      background: #fff;
+      outline: none;
+    }
+
+    textarea:focus {
+      border-color: rgba(25, 103, 210, 0.52);
+      box-shadow: 0 0 0 4px rgba(25, 103, 210, 0.12);
+    }
+
+    .result-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .result-item {
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: #f8fbfe;
+      border: 1px solid rgba(20, 50, 74, 0.08);
+    }
+
+    .result-label {
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .result-value {
+      margin-top: 8px;
+      font-weight: 700;
+      word-break: break-word;
+    }
+
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      min-width: 220px;
+      max-width: 420px;
+      padding: 14px 18px;
+      border-radius: 16px;
+      background: rgba(20, 50, 74, 0.92);
+      color: #fff;
+      box-shadow: 0 18px 40px rgba(20, 50, 74, 0.26);
+      opacity: 0;
+      transform: translateY(12px);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (max-width: 900px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <h1>OAuth 登录</h1>
+      <p>
+        这个页面只负责 OAuth 登录和回调导入。若服务部署在服务器上，
+        无法直接收到本机浏览器的 localhost 回调时，可以把浏览器地址栏里的完整回调 URL
+        粘贴到下面手动导入。
+      </p>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>登录入口</h2>
+        <p class="hint">
+          支持直接跳转到 Accio 登录页，也支持复制登录链接到其他浏览器打开。
+          默认回调仍然使用本地地址。
+        </p>
+
+        <div class="meta-block">
+          本地回调地址：<strong>{{ callback_url }}</strong><br>
+          登录链接：<strong>{{ login_url }}</strong>
+        </div>
+
+        <div class="actions">
+          <a class="link-button primary" href="/login" target="_blank" rel="noreferrer">立即登录</a>
+          <button class="button secondary" type="button" onclick="copyLoginLink()">复制登录链接</button>
+          <a class="link-button secondary" href="{{ dashboard_url }}">返回面板</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>手动导入回调地址</h2>
+        <p class="hint">
+          如果浏览器最终跳到了本地回调地址但服务器没有接收到，
+          直接复制地址栏中的完整 URL 粘贴到下方即可。
+        </p>
+
+        <label class="label" for="callback-url-input">完整回调 URL</label>
+        <textarea
+          id="callback-url-input"
+          placeholder="例如 http://127.0.0.1:4097/auth/callback?accessToken=...&refreshToken=...&expiresAt=..."
+        ></textarea>
+
+        <div class="actions">
+          <button class="button success" type="button" onclick="importCallbackUrl()">导入回调地址</button>
+        </div>
+
+        <div id="import-result" style="display:none;">
+          <div class="result-grid" id="result-grid"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    async function copyLoginLink() {
+      try {
+        const response = await fetch('/api/login-link');
+        const payload = await response.json();
+        if (!payload.success) {
+          showToast(payload.message || '获取登录链接失败');
+          return;
+        }
+        await navigator.clipboard.writeText(payload.url);
+        showToast('登录链接已复制到剪贴板');
+      } catch (error) {
+        console.error(error);
+        showToast('复制失败，请手动复制页面中的登录链接');
+      }
+    }
+
+    async function importCallbackUrl() {
+      const callbackUrl = document.getElementById('callback-url-input').value.trim();
+      if (!callbackUrl) {
+        showToast('请先粘贴完整的回调地址');
+        return;
+      }
+
+      try {
+        showToast('正在导入回调地址...');
+        const response = await fetch('/api/oauth/import-callback', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ callbackUrl })
+        });
+        const payload = await response.json();
+        if (!payload.success) {
+          showToast(payload.message || '导入失败');
+          return;
+        }
+
+        const account = payload.account || {};
+        const quota = payload.quota || {};
+        const resultGrid = document.getElementById('result-grid');
+        resultGrid.innerHTML = [
+          ['账号名', account.name || '-'],
+          ['UTDID', account.utdid || '-'],
+          ['Access Token', account.accessToken || '-'],
+          ['Token 过期', account.expiresAtText || '-'],
+          ['保存时间', account.addedAt || '-'],
+          ['剩余额度', quota.remaining_text || '未知']
+        ].map(([label, value]) => `
+          <div class="result-item">
+            <div class="result-label">${escapeHtml(label)}</div>
+            <div class="result-value">${escapeHtml(value)}</div>
+          </div>
+        `).join('');
+        document.getElementById('import-result').style.display = 'block';
+        showToast(payload.message || '导入成功');
+      } catch (error) {
+        console.error(error);
+        showToast('导入失败，请稍后重试');
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function showToast(text) {
+      const toast = document.getElementById('toast');
+      toast.textContent = text;
+      toast.classList.add('show');
+      window.clearTimeout(window.__accioToastTimer);
+      window.__accioToastTimer = window.setTimeout(() => {
+        toast.classList.remove('show');
+      }, 2800);
+    }
+  </script>
+</body>
+</html>
