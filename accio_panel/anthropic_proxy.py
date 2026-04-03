@@ -64,20 +64,12 @@ def _apply_thinking_config(request_body: dict[str, Any], body: dict[str, Any]) -
         return
 
     thinking_type = str(thinking.get("type") or "").strip().lower()
-    if thinking_type not in {"enabled", "adaptive"}:
+    if thinking_type != "enabled":
         return
 
     request_body["include_thoughts"] = True
-
-    level = _normalize_thinking_level(thinking.get("effort"))
-    if not level:
-        if thinking.get("budget_tokens") is not None:
-            level = _budget_to_thinking_level(thinking.get("budget_tokens"))
-        else:
-            level = "high"
-    request_body["thinking_level"] = level
-
-    if thinking_type == "enabled" and thinking.get("budget_tokens") is not None:
+    request_body["thinking_level"] = "high"
+    if thinking.get("budget_tokens") is not None:
         request_body["thinking_budget"] = thinking.get("budget_tokens")
 
 
@@ -159,7 +151,6 @@ def build_accio_request(
         "incremental": True,
         "max_output_tokens": body.get("max_tokens") or 8192,
         "contents": [],
-        "include_thoughts": False,
         "stop_sequences": _normalize_stop_sequences(
             body.get("stop_sequences", body.get("stop"))
         ),
@@ -191,10 +182,6 @@ def build_accio_request(
                 "name": str(tool.get("name") or ""),
                 "description": str(tool.get("description") or ""),
                 "parametersJson": json.dumps(
-                    tool.get("input_schema") or {},
-                    ensure_ascii=False,
-                ),
-                "parameters_json": json.dumps(
                     tool.get("input_schema") or {},
                     ensure_ascii=False,
                 ),
@@ -565,28 +552,31 @@ def iter_anthropic_sse_events(
             continue
 
         wrapped_raw = payload.get("raw_response_json") if isinstance(payload, dict) else None
-        if isinstance(payload, dict) and payload.get("turn_complete"):
-            if strict_wrapped_events or wrapped_raw is None:
+        if strict_wrapped_events:
+            if isinstance(payload, dict) and payload.get("turn_complete"):
+                continue
+            if wrapped_raw is None:
                 continue
 
-        # Claude 模型严格遵循 raw_response_json 包裹的 Anthropic 事件，
-        # 避免把 wrapper 自身字段误判成内容片段或重复结束事件。
-        raw_from_wrapped = _parse_raw_event(wrapped_raw) if wrapped_raw is not None else None
-        if raw_from_wrapped and raw_from_wrapped.get("type"):
+            # Claude 严格对齐 Worker 行为：
+            # 只消费 raw_response_json 中包裹的 Anthropic 事件。
+            raw_from_wrapped = _parse_raw_event(wrapped_raw)
+            if not raw_from_wrapped or not raw_from_wrapped.get("type"):
+                continue
+
             event_name = str(raw_from_wrapped["type"])
             if event_name == "message_stop":
                 got_message_stop = True
             if not started and event_name != "message_start":
                 started = True
-                yield "message_start", _fallback_message_start(model)
+                yield "message_start", _fallback_message_start_worker(model)
             if event_name == "message_start":
                 started = True
-                _ensure_message_start_fields(raw_from_wrapped, model)
+                _ensure_message_start_fields_worker(raw_from_wrapped, model)
             yield event_name, raw_from_wrapped
             continue
 
-        if strict_wrapped_events and wrapped_raw is not None:
-            continue
+        raw_from_wrapped = _parse_raw_event(wrapped_raw) if wrapped_raw is not None else None
 
         # 非 Claude 兼容路径继续保留更宽松的 fallback，
         # 兼容 Gemini / OpenAI 风格的包装载荷。
@@ -730,7 +720,7 @@ def iter_anthropic_sse_events(
             "index": active_block_index,
         }
 
-    if started and not got_message_stop:
+    if started and not got_message_stop and not strict_wrapped_events:
         yield "message_stop", {"type": "message_stop"}
 
 
@@ -1006,6 +996,12 @@ def _ensure_message_start_fields(event_payload: dict[str, Any], model: str) -> N
             usage.setdefault("cache_read_input_tokens", 0)
 
 
+def _ensure_message_start_fields_worker(event_payload: dict[str, Any], model: str) -> None:
+    message = event_payload.get("message")
+    if isinstance(message, dict):
+        message["model"] = model
+
+
 def _fallback_message_start(model: str) -> dict[str, Any]:
     return {
         "type": "message_start",
@@ -1022,6 +1018,25 @@ def _fallback_message_start(model: str) -> dict[str, Any]:
                 "output_tokens": 0,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
+            },
+        },
+    }
+
+
+def _fallback_message_start_worker(model: str) -> dict[str, Any]:
+    return {
+        "type": "message_start",
+        "message": {
+            "id": f"msg_{uuid.uuid4().hex}",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": model,
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
             },
         },
     }
