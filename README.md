@@ -110,6 +110,8 @@ admin
 
 - 使用 `x-api-key` 或 `Authorization: Bearer`
 - 值填写当前管理员密码
+- Gemini 兼容接口额外支持 `x-goog-api-key`、`?key=`、`?api_key=` 这几种官方常见传法
+- 如果管理员密码里包含 `+`，放到 URL Query 时请编码成 `%2B`
 - `/v1/models`、`/v1/messages`、`/v1/chat/completions`、`/v1/responses` 都需要这个鉴权
 - `/v1beta/models`、`/v1beta/models/{model}`、`/v1beta/models/{model}:generateContent`、`/v1beta/models/{model}:streamGenerateContent` 也使用同一套鉴权
 - `/v1/models` 与 `/v1beta/models` 会优先调用 `POST /api/llm/config` 动态拉取模型目录，并缓存 60 秒

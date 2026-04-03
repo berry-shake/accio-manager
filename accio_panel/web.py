@@ -471,9 +471,26 @@ def _extract_proxy_api_key(request: Request) -> str:
     if api_key:
         return api_key
 
+    api_key = str(request.headers.get("x-goog-api-key") or "").strip()
+    if api_key:
+        return api_key
+
     authorization = str(request.headers.get("authorization") or "").strip()
     if authorization.lower().startswith("bearer "):
         return authorization[7:].strip()
+
+    from urllib.parse import unquote
+
+    raw_query = str(request.url.query or "")
+    for pair in raw_query.split("&"):
+        if not pair:
+            continue
+        name, separator, value = pair.partition("=")
+        if not separator:
+            continue
+        normalized_name = unquote(name).strip().lower()
+        if normalized_name in {"key", "api_key", "x-api-key"}:
+            return unquote(value).strip()
     return ""
 
 
