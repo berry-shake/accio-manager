@@ -700,6 +700,7 @@
                 <th>模式</th>
                 <th>结果</th>
                 <th>空回复</th>
+                <th>图片</th>
                 <th>Tokens</th>
                 <th>耗时</th>
                 <th>说明</th>
@@ -715,6 +716,7 @@
                 <td>{{ "流式" if item.stream else "非流式" }}</td>
                 <td>{{ "成功" if item.success else "失败" }}</td>
                 <td>{{ "是" if item.emptyResponse else "否" }}</td>
+                <td>{{ item.imageSummary }}</td>
                 <td>{{ item.inputTokens }} / {{ item.outputTokens }}</td>
                 <td>{{ item.durationMs }}ms</td>
                 <td>{{ item.message }}</td>

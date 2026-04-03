@@ -22,7 +22,7 @@
 - 支持为每个账号设置优先填充优先级
 - 支持全局上游代理：HTTP / HTTPS / SOCKS4 / SOCKS5
 - 内置统计界面：模型调用次数、输入 / 输出 Tokens、账号维度统计
-- 内置日志界面：记录 Anthropic / OpenAI / Gemini 兼容调用的账号选择、上游错误与空回复
+- 内置日志界面：记录 Anthropic / OpenAI / Gemini 兼容调用的账号选择、上游错误、空回复与图片摘要
 
 ## 启动
 

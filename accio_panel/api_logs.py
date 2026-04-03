@@ -16,6 +16,83 @@ def _truncate(value: Any, limit: int = 500) -> str:
     return f"{text[:limit]}..."
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in items:
+            items.append(text)
+    return items
+
+
+def _format_bytes(size: int) -> str:
+    value = float(max(0, size))
+    units = ["B", "KB", "MB", "GB"]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{int(size)}B"
+
+
+def _extract_image_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    image_blocks = _as_int(
+        payload.get("imageBlocks", payload.get("image_blocks")),
+        0,
+    )
+    has_image_data = bool(payload.get("hasImageData", payload.get("has_image_data")))
+    if image_blocks > 0:
+        has_image_data = True
+
+    image_mime_types = _coerce_string_list(
+        payload.get("imageMimeTypes", payload.get("image_mime_types"))
+    )
+    image_sources = _coerce_string_list(
+        payload.get("imageSources", payload.get("image_sources"))
+    )
+    image_data_chars = _as_int(
+        payload.get("imageDataChars", payload.get("image_data_chars")),
+        0,
+    )
+    image_data_bytes = _as_int(
+        payload.get("imageDataBytes", payload.get("image_data_bytes")),
+        0,
+    )
+
+    summary_parts: list[str] = []
+    if has_image_data:
+        summary_parts.append(f"{max(image_blocks, 1)}块图像")
+        if image_mime_types:
+            summary_parts.append("/".join(image_mime_types[:2]))
+        if image_data_bytes > 0:
+            summary_parts.append(_format_bytes(image_data_bytes))
+        elif image_data_chars > 0:
+            summary_parts.append(f"base64 {image_data_chars}字符")
+        elif image_sources:
+            summary_parts.append("/".join(image_sources[:2]))
+
+    return {
+        "hasImageData": has_image_data,
+        "imageBlocks": image_blocks,
+        "imageMimeTypes": image_mime_types,
+        "imageSources": image_sources,
+        "imageDataChars": image_data_chars,
+        "imageDataBytes": image_data_bytes,
+        "imageSummary": " / ".join(summary_parts) if summary_parts else "-",
+    }
+
+
 class ApiLogStore:
     def __init__(self, file_path: Path):
         self.file_path = file_path
@@ -23,10 +100,18 @@ class ApiLogStore:
         self._lock = threading.RLock()
 
     def record(self, payload: dict[str, Any]) -> None:
+        image_summary = _extract_image_summary(payload)
         entry = {
             "id": uuid.uuid4().hex,
             "createdAt": now_text(),
             **payload,
+            "hasImageData": payload.get("hasImageData", image_summary["hasImageData"]),
+            "imageBlocks": payload.get("imageBlocks", image_summary["imageBlocks"]),
+            "imageMimeTypes": payload.get("imageMimeTypes", image_summary["imageMimeTypes"]),
+            "imageSources": payload.get("imageSources", image_summary["imageSources"]),
+            "imageDataChars": payload.get("imageDataChars", image_summary["imageDataChars"]),
+            "imageDataBytes": payload.get("imageDataBytes", image_summary["imageDataBytes"]),
+            "imageSummary": payload.get("imageSummary", image_summary["imageSummary"]),
         }
         with self._lock:
             with self.file_path.open("a", encoding="utf-8") as handle:
@@ -52,6 +137,7 @@ class ApiLogStore:
             if not isinstance(payload, dict):
                 continue
 
+            image_summary = _extract_image_summary(payload)
             item = {
                 "id": str(payload.get("id") or ""),
                 "createdAt": str(payload.get("createdAt") or "-"),
@@ -69,6 +155,7 @@ class ApiLogStore:
                 "inputTokens": int(payload.get("inputTokens") or 0),
                 "outputTokens": int(payload.get("outputTokens") or 0),
                 "durationMs": int(payload.get("durationMs") or 0),
+                **image_summary,
                 "detailJson": json.dumps(payload, ensure_ascii=False, indent=2),
             }
             items.append(item)

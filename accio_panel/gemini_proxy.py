@@ -870,6 +870,76 @@ def build_gemini_generate_content_response(
     return normalize_gemini_response_payload(payload, model=model)
 
 
+def _estimate_base64_bytes(data: Any) -> int:
+    text = str(data or "").strip()
+    if not text:
+        return 0
+    padding = len(text) - len(text.rstrip("="))
+    return max(0, (len(text) * 3) // 4 - padding)
+
+
+def _collect_gemini_image_details(payload: dict[str, Any]) -> dict[str, Any]:
+    image_blocks = 0
+    image_data_chars = 0
+    image_data_bytes = 0
+    image_mime_types: list[str] = []
+    image_sources: list[str] = []
+
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content")
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+
+                inline_data = part.get("inlineData")
+                if isinstance(inline_data, dict):
+                    image_blocks += 1
+                    mime_type = str(
+                        inline_data.get("mimeType", inline_data.get("mime_type")) or ""
+                    ).strip()
+                    if mime_type and mime_type not in image_mime_types:
+                        image_mime_types.append(mime_type)
+                    if "inlineData" not in image_sources:
+                        image_sources.append("inlineData")
+                    data = str(inline_data.get("data") or "")
+                    image_data_chars += len(data)
+                    image_data_bytes += _estimate_base64_bytes(data)
+                    continue
+
+                file_data = part.get("fileData")
+                if isinstance(file_data, dict):
+                    image_blocks += 1
+                    mime_type = str(
+                        file_data.get("mimeType", file_data.get("mime_type")) or ""
+                    ).strip()
+                    if mime_type and mime_type not in image_mime_types:
+                        image_mime_types.append(mime_type)
+                    if "fileData" not in image_sources:
+                        image_sources.append("fileData")
+                    data = str(file_data.get("data") or "")
+                    if data:
+                        image_data_chars += len(data)
+                        image_data_bytes += _estimate_base64_bytes(data)
+
+    return {
+        "has_image_data": image_blocks > 0,
+        "image_blocks": image_blocks,
+        "image_mime_types": image_mime_types,
+        "image_sources": image_sources,
+        "image_data_chars": image_data_chars,
+        "image_data_bytes": image_data_bytes,
+    }
+
+
 def iter_gemini_generate_content_sse_bytes(
     response: requests.Response,
     model: str,
@@ -892,6 +962,11 @@ def iter_gemini_generate_content_sse_bytes(
         "text_chars": 0,
         "tool_use_blocks": 0,
         "image_blocks": 0,
+        "has_image_data": False,
+        "image_mime_types": [],
+        "image_sources": [],
+        "image_data_chars": 0,
+        "image_data_bytes": 0,
         "empty_response": True,
         "usage": {
             "input_tokens": 0,
@@ -916,6 +991,37 @@ def iter_gemini_generate_content_sse_bytes(
                 int(summary["image_blocks"]),
                 int(chunk_summary["image_blocks"]),
             )
+            summary["has_image_data"] = bool(summary["has_image_data"]) or bool(
+                chunk_summary["has_image_data"]
+            )
+            summary["image_data_chars"] = max(
+                int(summary["image_data_chars"]),
+                int(chunk_summary["image_data_chars"]),
+            )
+            summary["image_data_bytes"] = max(
+                int(summary["image_data_bytes"]),
+                int(chunk_summary["image_data_bytes"]),
+            )
+            current_mime_types = [
+                str(value).strip()
+                for value in summary.get("image_mime_types", [])
+                if str(value).strip()
+            ]
+            for mime_type in chunk_summary.get("image_mime_types", []):
+                normalized_mime = str(mime_type).strip()
+                if normalized_mime and normalized_mime not in current_mime_types:
+                    current_mime_types.append(normalized_mime)
+            summary["image_mime_types"] = current_mime_types
+            current_sources = [
+                str(value).strip()
+                for value in summary.get("image_sources", [])
+                if str(value).strip()
+            ]
+            for source in chunk_summary.get("image_sources", []):
+                normalized_source = str(source).strip()
+                if normalized_source and normalized_source not in current_sources:
+                    current_sources.append(normalized_source)
+            summary["image_sources"] = current_sources
             summary["empty_response"] = False
             summary["usage"] = usage
             summary["stop_reason"] = extract_gemini_finish_reason(payload)
@@ -926,6 +1032,11 @@ def iter_gemini_generate_content_sse_bytes(
             summary["text_chars"] = int(final_summary["text_chars"])
             summary["tool_use_blocks"] = int(final_summary["tool_use_blocks"])
             summary["image_blocks"] = int(final_summary["image_blocks"])
+            summary["has_image_data"] = bool(final_summary["has_image_data"])
+            summary["image_mime_types"] = list(final_summary.get("image_mime_types", []))
+            summary["image_sources"] = list(final_summary.get("image_sources", []))
+            summary["image_data_chars"] = int(final_summary["image_data_chars"])
+            summary["image_data_bytes"] = int(final_summary["image_data_bytes"])
             summary["empty_response"] = bool(final_summary["empty_response"])
             summary["usage"] = extract_gemini_usage(latest_payload)
             summary["stop_reason"] = extract_gemini_finish_reason(latest_payload)
@@ -963,10 +1074,9 @@ def extract_gemini_finish_reason(payload: dict[str, Any]) -> str:
     return "STOP"
 
 
-def summarize_gemini_response(payload: dict[str, Any]) -> dict[str, int | bool]:
+def summarize_gemini_response(payload: dict[str, Any]) -> dict[str, Any]:
     text_chars = 0
     tool_use_blocks = 0
-    image_blocks = 0
 
     candidates = payload.get("candidates")
     if isinstance(candidates, list):
@@ -986,14 +1096,18 @@ def summarize_gemini_response(payload: dict[str, Any]) -> dict[str, int | bool]:
                     text_chars += len(str(part.get("text") or ""))
                 if isinstance(part.get("functionCall"), dict):
                     tool_use_blocks += 1
-                if isinstance(part.get("inlineData"), dict) or isinstance(
-                    part.get("fileData"), dict
-                ):
-                    image_blocks += 1
+
+    image_details = _collect_gemini_image_details(payload)
+    image_blocks = int(image_details["image_blocks"])
 
     return {
         "text_chars": text_chars,
         "tool_use_blocks": tool_use_blocks,
         "image_blocks": image_blocks,
+        "has_image_data": bool(image_details["has_image_data"]),
+        "image_mime_types": list(image_details["image_mime_types"]),
+        "image_sources": list(image_details["image_sources"]),
+        "image_data_chars": int(image_details["image_data_chars"]),
+        "image_data_bytes": int(image_details["image_data_bytes"]),
         "empty_response": text_chars <= 0 and tool_use_blocks <= 0 and image_blocks <= 0,
     }
