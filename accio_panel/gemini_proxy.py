@@ -76,6 +76,10 @@ def normalize_gemini_model_name(model_name: Any) -> str:
     return normalized
 
 
+def _is_image_generation_model(model_name: Any) -> bool:
+    return "image-preview" in normalize_gemini_model_name(model_name).lower()
+
+
 def _supported_generation_methods() -> list[str]:
     return ["generateContent", "streamGenerateContent"]
 
@@ -624,14 +628,31 @@ def _merge_gemini_parts(
 ) -> list[dict[str, Any]]:
     merged = [dict(part) for part in existing_parts]
     for index, incoming_part in enumerate(incoming_parts):
+        incoming_has_structured = any(
+            isinstance(incoming_part.get(key), dict)
+            for key in ("inlineData", "fileData", "functionCall", "functionResponse")
+        )
         if index >= len(merged):
             merged.append(dict(incoming_part))
             continue
 
         current_part = dict(merged[index])
+        current_has_structured = any(
+            isinstance(current_part.get(key), dict)
+            for key in ("inlineData", "fileData", "functionCall", "functionResponse")
+        )
         incoming_text = incoming_part.get("text")
         current_text = current_part.get("text")
-        if incoming_text is not None:
+
+        if incoming_has_structured and not current_has_structured and current_text is not None:
+            merged.append(dict(incoming_part))
+            continue
+
+        if current_has_structured and not incoming_has_structured and incoming_text is not None:
+            merged.append(dict(incoming_part))
+            continue
+
+        if incoming_text is not None and not incoming_has_structured and not current_has_structured:
             current_part["text"] = f"{current_text or ''}{incoming_text}"
 
         for key in (
@@ -854,6 +875,18 @@ def iter_gemini_generate_content_sse_bytes(
     model: str,
     on_complete: Callable[[dict[str, Any]], None] | None = None,
 ) -> Iterator[bytes]:
+    if _is_image_generation_model(model):
+        payload = decode_gemini_generate_content_response(response, model)
+        summary = summarize_gemini_response(payload)
+        summary["usage"] = extract_gemini_usage(payload)
+        summary["stop_reason"] = extract_gemini_finish_reason(payload)
+        try:
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+        finally:
+            if on_complete is not None:
+                on_complete(summary)
+        return
+
     latest_payload: dict[str, Any] | None = None
     summary = {
         "text_chars": 0,
