@@ -519,8 +519,20 @@ def iter_anthropic_sse_events(
     response: requests.Response,
     model: str,
 ) -> Iterator[tuple[str, dict[str, Any]]]:
+    """将上游 phoenix-gw 的 SSE 流转换为 Anthropic Messages SSE 事件序列。
+
+    核心职责：
+    - 维护 content block 的生命周期（start → 多次 delta → stop）
+    - 同类型的连续 text/thinking delta 复用同一个 block，不重复 start/stop
+    - tool_use block 每个工具独立（start → delta → stop）
+    - 保证 message_start 在最前面，message_stop 在最后面
+    """
     started = False
     next_block_index = 0
+    # 当前活跃的 block 类型: None / "text" / "thinking"
+    # tool_use 不保持活跃状态（每个工具独立关闭）
+    active_block_type: str | None = None
+    active_block_index: int = -1
 
     for raw_line in response.iter_lines(decode_unicode=True):
         line = (raw_line or "").strip()
@@ -543,41 +555,135 @@ def iter_anthropic_sse_events(
         if not raw_event:
             continue
 
-        expanded_events, next_block_index = _expand_raw_payload_to_anthropic_events(
-            raw_event,
-            next_block_index=next_block_index,
-        )
-        for event_name, event_payload in expanded_events:
+        # 如果上游已经是 Anthropic 原生格式（有 type 字段），直接透传
+        if raw_event.get("type"):
+            event_name = str(raw_event.get("type") or "message_delta")
             if not started and event_name != "message_start":
                 started = True
                 yield "message_start", _fallback_message_start(model)
-
             if event_name == "message_start":
                 started = True
-                message = event_payload.get("message")
-                if isinstance(message, dict):
-                    message.setdefault("id", f"msg_{uuid.uuid4().hex}")
-                    message.setdefault("type", "message")
-                    message.setdefault("role", "assistant")
-                    message.setdefault("content", [])
-                    message["model"] = model
-                    message.setdefault("stop_reason", None)
-                    message.setdefault("stop_sequence", None)
-                    usage = message.get("usage")
-                    if not isinstance(usage, dict):
-                        message["usage"] = {
-                            "input_tokens": 0,
-                            "output_tokens": 0,
-                            "cache_creation_input_tokens": 0,
-                            "cache_read_input_tokens": 0,
+                _ensure_message_start_fields(raw_event, model)
+            yield event_name, raw_event
+            continue
+
+        # 上游是 Gemini/OpenAI 格式，需要提取内容片段
+        fragments = _extract_content_fragments(raw_event)
+
+        for frag in fragments:
+            if not started:
+                started = True
+                yield "message_start", _fallback_message_start(model)
+
+            frag_kind = frag["kind"]
+
+            if frag_kind in ("text", "thinking"):
+                # 同类型的连续 delta 复用同一个 block
+                if active_block_type != frag_kind:
+                    # 先关闭之前的活跃 block
+                    if active_block_type is not None:
+                        yield "content_block_stop", {
+                            "type": "content_block_stop",
+                            "index": active_block_index,
+                        }
+                    # 开启新的 block
+                    active_block_type = frag_kind
+                    active_block_index = next_block_index
+                    next_block_index += 1
+                    if frag_kind == "thinking":
+                        yield "content_block_start", {
+                            "type": "content_block_start",
+                            "index": active_block_index,
+                            "content_block": {"type": "thinking", "thinking": ""},
                         }
                     else:
-                        usage.setdefault("input_tokens", 0)
-                        usage.setdefault("output_tokens", 0)
-                        usage.setdefault("cache_creation_input_tokens", 0)
-                        usage.setdefault("cache_read_input_tokens", 0)
+                        yield "content_block_start", {
+                            "type": "content_block_start",
+                            "index": active_block_index,
+                            "content_block": {"type": "text", "text": ""},
+                        }
 
-            yield event_name, event_payload
+                # 发送 delta
+                if frag_kind == "thinking":
+                    yield "content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": active_block_index,
+                        "delta": {"type": "thinking_delta", "thinking": frag["text"]},
+                    }
+                else:
+                    yield "content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": active_block_index,
+                        "delta": {"type": "text_delta", "text": frag["text"]},
+                    }
+
+            elif frag_kind == "signature":
+                # signature 跟在 thinking block 后面
+                if active_block_type == "thinking":
+                    yield "content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": active_block_index,
+                        "delta": {"type": "signature_delta", "signature": frag["signature"]},
+                    }
+
+            elif frag_kind == "tool_use":
+                # 先关闭活跃的 text/thinking block
+                if active_block_type is not None:
+                    yield "content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": active_block_index,
+                    }
+                    active_block_type = None
+
+                # tool_use 是独立的 block（start → delta → stop）
+                tool_index = next_block_index
+                next_block_index += 1
+                yield "content_block_start", {
+                    "type": "content_block_start",
+                    "index": tool_index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": frag["id"],
+                        "name": frag["name"],
+                        "input": {},
+                    },
+                }
+                if frag.get("args_json"):
+                    yield "content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": tool_index,
+                        "delta": {"type": "input_json_delta", "partial_json": frag["args_json"]},
+                    }
+                yield "content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": tool_index,
+                }
+
+            elif frag_kind == "finish":
+                # 先关闭活跃的 block
+                if active_block_type is not None:
+                    yield "content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": active_block_index,
+                    }
+                    active_block_type = None
+
+                msg_delta: dict[str, Any] = {"type": "message_delta"}
+                if frag.get("stop_reason"):
+                    msg_delta["delta"] = {
+                        "stop_reason": frag["stop_reason"],
+                        "stop_sequence": None,
+                    }
+                if frag.get("usage"):
+                    msg_delta["usage"] = frag["usage"]
+                yield "message_delta", msg_delta
+
+    # 关闭最后一个活跃的 block
+    if active_block_type is not None:
+        yield "content_block_stop", {
+            "type": "content_block_stop",
+            "index": active_block_index,
+        }
 
     if started:
         yield "message_stop", {"type": "message_stop"}
@@ -829,6 +935,32 @@ def _parse_raw_event(value: Any) -> dict[str, Any] | None:
     return None
 
 
+def _ensure_message_start_fields(event_payload: dict[str, Any], model: str) -> None:
+    """补全 message_start 事件中可能缺少的字段。"""
+    message = event_payload.get("message")
+    if isinstance(message, dict):
+        message.setdefault("id", f"msg_{uuid.uuid4().hex}")
+        message.setdefault("type", "message")
+        message.setdefault("role", "assistant")
+        message.setdefault("content", [])
+        message["model"] = model
+        message.setdefault("stop_reason", None)
+        message.setdefault("stop_sequence", None)
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            message["usage"] = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            }
+        else:
+            usage.setdefault("input_tokens", 0)
+            usage.setdefault("output_tokens", 0)
+            usage.setdefault("cache_creation_input_tokens", 0)
+            usage.setdefault("cache_read_input_tokens", 0)
+
+
 def _fallback_message_start(model: str) -> dict[str, Any]:
     return {
         "type": "message_start",
@@ -901,21 +1033,21 @@ def _usage_from_gemini_payload(payload: dict[str, Any]) -> dict[str, int] | None
     }
 
 
-def _expand_raw_payload_to_anthropic_events(
+def _extract_content_fragments(
     raw_event: dict[str, Any],
-    *,
-    next_block_index: int,
-) -> tuple[list[tuple[str, dict[str, Any]]], int]:
-    if raw_event.get("type"):
-        return [
-            (
-                str(raw_event.get("type") or "message_delta"),
-                raw_event,
-            )
-        ], next_block_index
+) -> list[dict[str, Any]]:
+    """从上游 Gemini/OpenAI 格式的 payload 中提取内容片段。
 
-    events: list[tuple[str, dict[str, Any]]] = []
+    返回一个 fragment 列表，每个 fragment 是一个 dict：
+    - {"kind": "text", "text": "..."}
+    - {"kind": "thinking", "text": "..."}
+    - {"kind": "signature", "signature": "..."}
+    - {"kind": "tool_use", "id": "...", "name": "...", "args_json": "..."}
+    - {"kind": "finish", "stop_reason": "...", "usage": {...}}
+    """
+    fragments: list[dict[str, Any]] = []
 
+    # --- Gemini 格式: candidates[].content.parts[] ---
     candidates = raw_event.get("candidates")
     if isinstance(candidates, list) and candidates:
         candidate = candidates[0] if isinstance(candidates[0], dict) else {}
@@ -932,62 +1064,14 @@ def _expand_raw_payload_to_anthropic_events(
 
             text = part.get("text")
             if text is not None:
-                block_type = "thinking" if bool(part.get("thought")) else "text"
-                if block_type == "thinking":
-                    events.append(
-                        (
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": next_block_index,
-                                "content_block": {"type": "thinking", "thinking": ""},
-                            },
-                        )
-                    )
-                else:
-                    events.append(
-                        (
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": next_block_index,
-                                "content_block": {"type": "text", "text": ""},
-                            },
-                        )
-                    )
-                if block_type == "thinking":
-                    events.append((
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": next_block_index,
-                            "delta": {"type": "thinking_delta", "thinking": str(text or "")},
-                        },
-                    ))
-                else:
-                    events.append((
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": next_block_index,
-                            "delta": {"type": "text_delta", "text": str(text or "")},
-                        },
-                    ))
+                kind = "thinking" if bool(part.get("thought")) else "text"
+                fragments.append({"kind": kind, "text": str(text or "")})
                 thought_signature = part.get(
                     "thoughtSignature",
                     part.get("thought_signature"),
                 )
                 if thought_signature:
-                    events.append((
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": next_block_index,
-                            "delta": {"type": "signature_delta", "signature": str(thought_signature)},
-                        },
-                    ))
-                events.append(("content_block_stop", {"type": "content_block_stop", "index": next_block_index}))
-                next_block_index += 1
+                    fragments.append({"kind": "signature", "signature": str(thought_signature)})
                 continue
 
             function_call = part.get("functionCall", part.get("function_call"))
@@ -1002,39 +1086,17 @@ def _expand_raw_payload_to_anthropic_events(
                 args_value = function_call.get("args")
                 if args_value is None:
                     args_value = function_call.get("argsJson")
-                events.append(
-                    (
-                        "content_block_start",
-                        {
-                            "type": "content_block_start",
-                            "index": next_block_index,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": tool_id,
-                                "name": tool_name,
-                                "input": {},
-                            },
-                        },
-                    )
-                )
                 args_json = (
                     args_value
                     if isinstance(args_value, str)
                     else json.dumps(args_value or {}, ensure_ascii=False)
                 )
-                if args_json:
-                    events.append(
-                        (
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": next_block_index,
-                                "delta": {"type": "input_json_delta", "partial_json": args_json},
-                            },
-                        )
-                    )
-                events.append(("content_block_stop", {"type": "content_block_stop", "index": next_block_index}))
-                next_block_index += 1
+                fragments.append({
+                    "kind": "tool_use",
+                    "id": tool_id,
+                    "name": tool_name,
+                    "args_json": args_json or "",
+                })
 
         finish_reason = _map_vendor_finish_reason(
             candidate.get("finishReason", raw_event.get("finishReason"))
@@ -1043,15 +1105,16 @@ def _expand_raw_payload_to_anthropic_events(
         )
         usage = _usage_from_gemini_payload(raw_event)
         if finish_reason or usage:
-            payload: dict[str, Any] = {"type": "message_delta"}
+            frag: dict[str, Any] = {"kind": "finish"}
             if finish_reason:
-                payload["delta"] = {"stop_reason": finish_reason, "stop_sequence": None}
+                frag["stop_reason"] = finish_reason
             if usage:
-                payload["usage"] = usage
-            events.append(("message_delta", payload))
+                frag["usage"] = usage
+            fragments.append(frag)
 
-        return events, next_block_index
+        return fragments
 
+    # --- OpenAI 格式: choices[].delta / choices[].message ---
     choices = raw_event.get("choices")
     if isinstance(choices, list) and choices:
         choice = choices[0] if isinstance(choices[0], dict) else {}
@@ -1066,28 +1129,7 @@ def _expand_raw_payload_to_anthropic_events(
         if text is None:
             text = message.get("content")
         if text is not None:
-            events.append(
-                (
-                    "content_block_start",
-                    {
-                        "type": "content_block_start",
-                        "index": next_block_index,
-                        "content_block": {"type": "text", "text": ""},
-                    },
-                )
-            )
-            events.append(
-                (
-                    "content_block_delta",
-                    {
-                        "type": "content_block_delta",
-                        "index": next_block_index,
-                        "delta": {"type": "text_delta", "text": str(text or "")},
-                    },
-                )
-            )
-            events.append(("content_block_stop", {"type": "content_block_stop", "index": next_block_index}))
-            next_block_index += 1
+            fragments.append({"kind": "text", "text": str(text or "")})
 
         tool_calls = delta.get("tool_calls")
         if not isinstance(tool_calls, list):
@@ -1109,45 +1151,23 @@ def _expand_raw_payload_to_anthropic_events(
                     if isinstance(args_value, str)
                     else json.dumps(args_value or {}, ensure_ascii=False)
                 )
-                events.append(
-                    (
-                        "content_block_start",
-                        {
-                            "type": "content_block_start",
-                            "index": next_block_index,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": tool_id,
-                                "name": tool_name,
-                                "input": {},
-                            },
-                        },
-                    )
-                )
-                if args_json:
-                    events.append(
-                        (
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": next_block_index,
-                                "delta": {"type": "input_json_delta", "partial_json": args_json},
-                            },
-                        )
-                    )
-                events.append(("content_block_stop", {"type": "content_block_stop", "index": next_block_index}))
-                next_block_index += 1
+                fragments.append({
+                    "kind": "tool_use",
+                    "id": tool_id,
+                    "name": tool_name,
+                    "args_json": args_json or "",
+                })
 
         finish_reason = _map_vendor_finish_reason(
             choice.get("finish_reason") if isinstance(choice, dict) else None
         )
         usage = _usage_from_openai_payload(raw_event)
         if finish_reason or usage:
-            payload: dict[str, Any] = {"type": "message_delta"}
+            frag = {"kind": "finish"}
             if finish_reason:
-                payload["delta"] = {"stop_reason": finish_reason, "stop_sequence": None}
+                frag["stop_reason"] = finish_reason
             if usage:
-                payload["usage"] = usage
-            events.append(("message_delta", payload))
+                frag["usage"] = usage
+            fragments.append(frag)
 
-    return events, next_block_index
+    return fragments
