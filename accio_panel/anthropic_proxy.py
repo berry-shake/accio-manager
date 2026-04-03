@@ -536,10 +536,9 @@ def iter_anthropic_sse_events(
         except json.JSONDecodeError:
             continue
 
-        if isinstance(payload, dict) and payload.get("turn_complete"):
-            continue
-
         wrapped_raw = payload.get("raw_response_json") if isinstance(payload, dict) else None
+        if isinstance(payload, dict) and payload.get("turn_complete") and wrapped_raw is None:
+            continue
         raw_event = _parse_raw_event(wrapped_raw if wrapped_raw is not None else payload)
         if not raw_event:
             continue
@@ -557,7 +556,10 @@ def iter_anthropic_sse_events(
                 started = True
                 message = event_payload.get("message")
                 if isinstance(message, dict):
+                    message.setdefault("id", f"msg_{uuid.uuid4().hex}")
                     message.setdefault("type", "message")
+                    message.setdefault("role", "assistant")
+                    message.setdefault("content", [])
                     message["model"] = model
                     message.setdefault("stop_reason", None)
                     message.setdefault("stop_sequence", None)
@@ -566,12 +568,19 @@ def iter_anthropic_sse_events(
                         message["usage"] = {
                             "input_tokens": 0,
                             "output_tokens": 0,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
                         }
                     else:
                         usage.setdefault("input_tokens", 0)
                         usage.setdefault("output_tokens", 0)
+                        usage.setdefault("cache_creation_input_tokens", 0)
+                        usage.setdefault("cache_read_input_tokens", 0)
 
             yield event_name, event_payload
+
+    if started:
+        yield "message_stop", {"type": "message_stop"}
 
 
 def iter_anthropic_sse_bytes(
@@ -834,6 +843,8 @@ def _fallback_message_start(model: str) -> dict[str, Any]:
             "usage": {
                 "input_tokens": 0,
                 "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
             },
         },
     }
@@ -922,31 +933,60 @@ def _expand_raw_payload_to_anthropic_events(
             text = part.get("text")
             if text is not None:
                 block_type = "thinking" if bool(part.get("thought")) else "text"
-                events.append(
-                    (
-                        "content_block_start",
-                        {
-                            "index": next_block_index,
-                            "content_block": {"type": block_type},
-                        },
+                if block_type == "thinking":
+                    events.append(
+                        (
+                            "content_block_start",
+                            {
+                                "type": "content_block_start",
+                                "index": next_block_index,
+                                "content_block": {"type": "thinking", "thinking": ""},
+                            },
+                        )
                     )
-                )
-                delta_payload: dict[str, Any] = {
-                    "index": next_block_index,
-                    "delta": (
-                        {"thinking": str(text or "")}
-                        if block_type == "thinking"
-                        else {"text": str(text or "")}
-                    ),
-                }
+                else:
+                    events.append(
+                        (
+                            "content_block_start",
+                            {
+                                "type": "content_block_start",
+                                "index": next_block_index,
+                                "content_block": {"type": "text", "text": ""},
+                            },
+                        )
+                    )
+                if block_type == "thinking":
+                    events.append((
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": next_block_index,
+                            "delta": {"type": "thinking_delta", "thinking": str(text or "")},
+                        },
+                    ))
+                else:
+                    events.append((
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": next_block_index,
+                            "delta": {"type": "text_delta", "text": str(text or "")},
+                        },
+                    ))
                 thought_signature = part.get(
                     "thoughtSignature",
                     part.get("thought_signature"),
                 )
                 if thought_signature:
-                    delta_payload["delta"]["signature"] = str(thought_signature)
-                events.append(("content_block_delta", delta_payload))
-                events.append(("content_block_stop", {"index": next_block_index}))
+                    events.append((
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": next_block_index,
+                            "delta": {"type": "signature_delta", "signature": str(thought_signature)},
+                        },
+                    ))
+                events.append(("content_block_stop", {"type": "content_block_stop", "index": next_block_index}))
                 next_block_index += 1
                 continue
 
@@ -966,11 +1006,13 @@ def _expand_raw_payload_to_anthropic_events(
                     (
                         "content_block_start",
                         {
+                            "type": "content_block_start",
                             "index": next_block_index,
                             "content_block": {
                                 "type": "tool_use",
                                 "id": tool_id,
                                 "name": tool_name,
+                                "input": {},
                             },
                         },
                     )
@@ -985,12 +1027,13 @@ def _expand_raw_payload_to_anthropic_events(
                         (
                             "content_block_delta",
                             {
+                                "type": "content_block_delta",
                                 "index": next_block_index,
-                                "delta": {"partial_json": args_json},
+                                "delta": {"type": "input_json_delta", "partial_json": args_json},
                             },
                         )
                     )
-                events.append(("content_block_stop", {"index": next_block_index}))
+                events.append(("content_block_stop", {"type": "content_block_stop", "index": next_block_index}))
                 next_block_index += 1
 
         finish_reason = _map_vendor_finish_reason(
@@ -1000,9 +1043,9 @@ def _expand_raw_payload_to_anthropic_events(
         )
         usage = _usage_from_gemini_payload(raw_event)
         if finish_reason or usage:
-            payload: dict[str, Any] = {}
+            payload: dict[str, Any] = {"type": "message_delta"}
             if finish_reason:
-                payload["delta"] = {"stop_reason": finish_reason}
+                payload["delta"] = {"stop_reason": finish_reason, "stop_sequence": None}
             if usage:
                 payload["usage"] = usage
             events.append(("message_delta", payload))
@@ -1027,8 +1070,9 @@ def _expand_raw_payload_to_anthropic_events(
                 (
                     "content_block_start",
                     {
+                        "type": "content_block_start",
                         "index": next_block_index,
-                        "content_block": {"type": "text"},
+                        "content_block": {"type": "text", "text": ""},
                     },
                 )
             )
@@ -1036,12 +1080,13 @@ def _expand_raw_payload_to_anthropic_events(
                 (
                     "content_block_delta",
                     {
+                        "type": "content_block_delta",
                         "index": next_block_index,
-                        "delta": {"text": str(text or "")},
+                        "delta": {"type": "text_delta", "text": str(text or "")},
                     },
                 )
             )
-            events.append(("content_block_stop", {"index": next_block_index}))
+            events.append(("content_block_stop", {"type": "content_block_stop", "index": next_block_index}))
             next_block_index += 1
 
         tool_calls = delta.get("tool_calls")
@@ -1068,11 +1113,13 @@ def _expand_raw_payload_to_anthropic_events(
                     (
                         "content_block_start",
                         {
+                            "type": "content_block_start",
                             "index": next_block_index,
                             "content_block": {
                                 "type": "tool_use",
                                 "id": tool_id,
                                 "name": tool_name,
+                                "input": {},
                             },
                         },
                     )
@@ -1082,12 +1129,13 @@ def _expand_raw_payload_to_anthropic_events(
                         (
                             "content_block_delta",
                             {
+                                "type": "content_block_delta",
                                 "index": next_block_index,
-                                "delta": {"partial_json": args_json},
+                                "delta": {"type": "input_json_delta", "partial_json": args_json},
                             },
                         )
                     )
-                events.append(("content_block_stop", {"index": next_block_index}))
+                events.append(("content_block_stop", {"type": "content_block_stop", "index": next_block_index}))
                 next_block_index += 1
 
         finish_reason = _map_vendor_finish_reason(
@@ -1095,9 +1143,9 @@ def _expand_raw_payload_to_anthropic_events(
         )
         usage = _usage_from_openai_payload(raw_event)
         if finish_reason or usage:
-            payload: dict[str, Any] = {}
+            payload: dict[str, Any] = {"type": "message_delta"}
             if finish_reason:
-                payload["delta"] = {"stop_reason": finish_reason}
+                payload["delta"] = {"stop_reason": finish_reason, "stop_sequence": None}
             if usage:
                 payload["usage"] = usage
             events.append(("message_delta", payload))
