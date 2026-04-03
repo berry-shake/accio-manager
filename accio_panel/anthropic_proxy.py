@@ -190,8 +190,14 @@ def build_accio_request(
             {
                 "name": str(tool.get("name") or ""),
                 "description": str(tool.get("description") or ""),
-                "parametersJson": json.dumps(tool.get("input_schema") or {}),
-                "parameters_json": json.dumps(tool.get("input_schema") or {}),
+                "parametersJson": json.dumps(
+                    tool.get("input_schema") or {},
+                    ensure_ascii=False,
+                ),
+                "parameters_json": json.dumps(
+                    tool.get("input_schema") or {},
+                    ensure_ascii=False,
+                ),
             }
             for tool in tools
             if isinstance(tool, dict) and tool.get("name")
@@ -299,7 +305,10 @@ def convert_messages(messages: list[Any]) -> list[dict[str, Any]]:
                                     "argsJson": (
                                         input_value
                                         if isinstance(input_value, str)
-                                        else json.dumps(input_value or {})
+                                        else json.dumps(
+                                            input_value or {},
+                                            ensure_ascii=False,
+                                        )
                                     ),
                                 },
                             }
@@ -391,7 +400,8 @@ def convert_messages(messages: list[Any]) -> list[dict[str, Any]]:
                             {
                                 "content": extract_tool_result_text(block.get("content")),
                                 "is_error": bool(block.get("is_error", False)),
-                            }
+                            },
+                            ensure_ascii=False,
                         ),
                     }
                     part: dict[str, Any] = {
@@ -534,6 +544,11 @@ def iter_anthropic_sse_events(
     active_block_type: str | None = None
     active_block_index: int = -1
     got_message_stop = False
+    normalized_model = str(model or "").strip().lower()
+    strict_wrapped_events = (
+        normalized_model in SUPPORTED_ANTHROPIC_MODELS_SET
+        or normalized_model.startswith("claude")
+    )
 
     for raw_line in response.iter_lines(decode_unicode=True):
         line = (raw_line or "").strip()
@@ -550,13 +565,14 @@ def iter_anthropic_sse_events(
             continue
 
         wrapped_raw = payload.get("raw_response_json") if isinstance(payload, dict) else None
-        if isinstance(payload, dict) and payload.get("turn_complete") and wrapped_raw is None:
-            continue
+        if isinstance(payload, dict) and payload.get("turn_complete"):
+            if strict_wrapped_events or wrapped_raw is None:
+                continue
 
-        # 优先尝试 raw_response_json（上游对 Claude 模型会返回标准 Anthropic 事件）
+        # Claude 模型严格遵循 raw_response_json 包裹的 Anthropic 事件，
+        # 避免把 wrapper 自身字段误判成内容片段或重复结束事件。
         raw_from_wrapped = _parse_raw_event(wrapped_raw) if wrapped_raw is not None else None
         if raw_from_wrapped and raw_from_wrapped.get("type"):
-            # 上游返回了标准 Anthropic 事件，直接透传
             event_name = str(raw_from_wrapped["type"])
             if event_name == "message_stop":
                 got_message_stop = True
@@ -569,9 +585,15 @@ def iter_anthropic_sse_events(
             yield event_name, raw_from_wrapped
             continue
 
-        # raw_response_json 不存在或不含 type → fallback 到整个 payload
-        raw_event = raw_from_wrapped if raw_from_wrapped is not None else (
-            _parse_raw_event(payload)
+        if strict_wrapped_events and wrapped_raw is not None:
+            continue
+
+        # 非 Claude 兼容路径继续保留更宽松的 fallback，
+        # 兼容 Gemini / OpenAI 风格的包装载荷。
+        raw_event = (
+            raw_from_wrapped
+            if raw_from_wrapped is not None
+            else _parse_raw_event(payload)
         )
         if not raw_event:
             continue
