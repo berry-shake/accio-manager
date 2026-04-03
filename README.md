@@ -14,11 +14,14 @@
 - 额度耗尽自动禁用，额度恢复自动启用
 - 单后台调度器按账号下次检查时间自动巡检额度
 - Anthropic 兼容 API：`/v1/models`、`/v1/messages`
+- OpenAI 兼容 API：`/v1/models`、`/v1/chat/completions`
+- OpenAI Responses 兼容 API：`/v1/responses`
+- Gemini 兼容 API：`/v1beta/models`、`/v1beta/models/{model}:generateContent`
 - 多账号 API 调度策略：优先填充 / 轮询
 - 支持为每个账号设置优先填充优先级
 - 支持全局上游代理：HTTP / HTTPS / SOCKS4 / SOCKS5
 - 内置统计界面：模型调用次数、输入 / 输出 Tokens、账号维度统计
-- 内置日志界面：记录 `/v1/messages` 的账号选择、上游错误与空回复
+- 内置日志界面：记录 Anthropic / OpenAI / Gemini 兼容调用的账号选择、上游错误与空回复
 
 ## 启动
 
@@ -41,6 +44,9 @@ uv run python main.py
 - `http://127.0.0.1:4097/login`
 - `http://127.0.0.1:4097/v1/models`
 - `http://127.0.0.1:4097/v1/messages`
+- `http://127.0.0.1:4097/v1/chat/completions`
+- `http://127.0.0.1:4097/v1/responses`
+- `http://127.0.0.1:4097/v1beta/models`
 - `http://127.0.0.1:4097/dashboard?view=logs`
 
 ## Docker
@@ -99,13 +105,16 @@ admin
 - `data/config.example.json`
 - `.env.example`
 
-Anthropic 兼容 API 调用时：
+兼容 API 调用时：
 
 - 使用 `x-api-key` 或 `Authorization: Bearer`
 - 值填写当前管理员密码
-- `/v1/models` 和 `/v1/messages` 都需要这个鉴权
-- 目前仅支持模型：`claude-sonnet-4-6`、`claude-opus-4-6`
+- `/v1/models`、`/v1/messages`、`/v1/chat/completions`、`/v1/responses` 都需要这个鉴权
+- `/v1beta/models` 和 `/v1beta/models/{model}:generateContent` 也使用同一套鉴权
+- 文本兼容模型：`claude-sonnet-4-6`、`claude-opus-4-6`、`gemini-3-flash-preview`、`gemini-3.1-pro-preview`、`gemini-3-pro-preview`
+- Gemini 生图模型：`gemini-3-pro-image-preview`、`gemini-3.1-flash-image-preview`
 - 其他模型会直接返回错误
+- 模型名不会做别名改写，按请求值直接透传到上游
 - 默认调度策略是 `优先填充`
 - 优先填充支持账号级 `fillPriority`，数值越小越优先；同优先级下会优先调用剩余额度更少的账号
 - 可在面板配置区设置全局上游代理，例如：
@@ -121,6 +130,42 @@ curl http://127.0.0.1:4097/v1/messages \
   -d "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":256,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}"
 ```
 
+Gemini 兼容调用示例：
+
+```bash
+curl http://127.0.0.1:4097/v1beta/models/gemini-3.1-pro-preview:generateContent \
+  -H "content-type: application/json" \
+  -H "x-api-key: admin" \
+  -d "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"你好\"}]}],\"generationConfig\":{\"maxOutputTokens\":1024}}"
+```
+
+Gemini 生图示例：
+
+```bash
+curl http://127.0.0.1:4097/v1beta/models/gemini-3-pro-image-preview:generateContent \
+  -H "content-type: application/json" \
+  -H "x-api-key: admin" \
+  -d "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"A realistic, crystal clear empty glass cup resting on a sleek wooden table\"}]}],\"generationConfig\":{\"responseModalities\":[\"TEXT\",\"IMAGE\"],\"imageConfig\":{\"aspectRatio\":\"1:1\",\"imageSize\":\"1K\"}}}"
+```
+
+OpenAI Chat 兼容调用示例：
+
+```bash
+curl http://127.0.0.1:4097/v1/chat/completions \
+  -H "content-type: application/json" \
+  -H "x-api-key: admin" \
+  -d "{\"model\":\"claude-sonnet-4-6\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}"
+```
+
+OpenAI Responses 兼容调用示例：
+
+```bash
+curl http://127.0.0.1:4097/v1/responses \
+  -H "content-type: application/json" \
+  -H "x-api-key: admin" \
+  -d "{\"model\":\"claude-sonnet-4-6\",\"input\":\"你好\",\"stream\":false}"
+```
+
 开启思考示例：
 
 ```bash
@@ -134,6 +179,9 @@ curl http://127.0.0.1:4097/v1/messages \
 
 - 如果客户端仍发送旧格式 `thinking: {\"type\":\"enabled\",\"budget_tokens\":...}`，系统也会继续兼容
 - 非流式返回会保留 `thinking` 块；如果上游返回了 `signature`，也会一并透传
+- `/v1/responses` 已支持基础流式事件、非流式返回，以及常见 `input` 项转换
+- `Responses input` 当前支持：纯字符串、`message`/`role` 消息项、`input_text`、`input_image`、`image_url`、`input_file`、`file`、`function_call`、`function_call_output`
+- `Responses` 额外字段如 `metadata`、`user`、`session_id`、`conversation_id`、`previous_response_id`、`include`、`truncation` 会继续向内部请求骨架透传
 
 ## 数据目录
 
@@ -149,8 +197,8 @@ data/
 ```
 
 - `config.json`：全局配置、管理员密码、会话密钥
-- `stats.json`：`/v1/messages` 的累计调用统计
-- `api-logs.jsonl`：`/v1/messages` 的逐条调用日志
+- `stats.json`：兼容 API 的累计调用统计
+- `api-logs.jsonl`：兼容 API 的逐条调用日志
 - `accounts/*.json`：每个账号单独一个文件
 - `accio-accounts.json`：旧版单文件账号列表，首次启动会自动迁移到 `accounts/` 目录
 - 面板支持导入单账号 JSON，也支持直接导入旧版 `accio-accounts.json` 数组文件

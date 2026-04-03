@@ -15,7 +15,21 @@ SUPPORTED_ANTHROPIC_MODELS = (
     "claude-opus-4-6",
 )
 SUPPORTED_ANTHROPIC_MODELS_SET = set(SUPPORTED_ANTHROPIC_MODELS)
+SUPPORTED_GEMINI_MODELS = (
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-3-pro-preview",
+)
+SUPPORTED_PROXY_MODELS = SUPPORTED_ANTHROPIC_MODELS + SUPPORTED_GEMINI_MODELS
+SUPPORTED_PROXY_MODELS_SET = set(SUPPORTED_PROXY_MODELS)
 DEFAULT_ANTHROPIC_MODEL = SUPPORTED_ANTHROPIC_MODELS[0]
+MODEL_OWNERS = {
+    "claude-sonnet-4-6": "anthropic",
+    "claude-opus-4-6": "anthropic",
+    "gemini-3-flash-preview": "google",
+    "gemini-3.1-pro-preview": "google",
+    "gemini-3-pro-preview": "google",
+}
 
 
 def _usage_summary() -> dict[str, int]:
@@ -67,6 +81,31 @@ def _apply_thinking_config(request_body: dict[str, Any], body: dict[str, Any]) -
         request_body["thinking_budget"] = thinking.get("budget_tokens")
 
 
+def _normalize_stop_sequences(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            items.append(text)
+    return items
+
+
+def _guess_image_mime_type(value: str) -> str:
+    lowered = value.lower()
+    if lowered.endswith(".jpg") or lowered.endswith(".jpeg"):
+        return "image/jpeg"
+    if lowered.endswith(".webp"):
+        return "image/webp"
+    if lowered.endswith(".gif"):
+        return "image/gif"
+    return "image/png"
+
+
 def build_models_payload() -> dict[str, object]:
     return {
         "object": "list",
@@ -74,9 +113,9 @@ def build_models_payload() -> dict[str, object]:
             {
                 "id": model_name,
                 "object": "model",
-                "owned_by": "anthropic",
+                "owned_by": MODEL_OWNERS.get(model_name, "anthropic"),
             }
-            for model_name in SUPPORTED_ANTHROPIC_MODELS
+            for model_name in SUPPORTED_PROXY_MODELS
         ],
     }
 
@@ -106,12 +145,29 @@ def build_accio_request(
         "utdid": utdid,
         "version": version,
         "token": token,
+        "empid": str(body.get("empid") or ""),
+        "tenant": str(body.get("tenant") or ""),
+        "iai_tag": str(body.get("iai_tag", body.get("iaiTag")) or ""),
         "stream": True,
         "model": body.get("model") or DEFAULT_ANTHROPIC_MODEL,
-        "request_id": f"req-{uuid.uuid4()}",
+        "request_id": str(
+            body.get("request_id")
+            or body.get("requestId")
+            or f"req-{uuid.uuid4()}"
+        ),
+        "message_id": str(body.get("message_id", body.get("messageId")) or ""),
         "incremental": True,
         "max_output_tokens": body.get("max_tokens") or 8192,
         "contents": [],
+        "include_thoughts": False,
+        "stop_sequences": _normalize_stop_sequences(
+            body.get("stop_sequences", body.get("stop"))
+        ),
+        "properties": (
+            dict(body.get("properties"))
+            if isinstance(body.get("properties"), dict)
+            else {}
+        ),
     }
 
     system_value = body.get("system")
@@ -121,6 +177,10 @@ def build_accio_request(
 
     if body.get("temperature") is not None:
         request_body["temperature"] = body.get("temperature")
+    if body.get("top_p") is not None:
+        request_body["top_p"] = body.get("top_p")
+    if body.get("response_format") is not None:
+        request_body["response_format"] = body.get("response_format")
 
     _apply_thinking_config(request_body, body)
 
@@ -131,6 +191,7 @@ def build_accio_request(
                 "name": str(tool.get("name") or ""),
                 "description": str(tool.get("description") or ""),
                 "parametersJson": json.dumps(tool.get("input_schema") or {}),
+                "parameters_json": json.dumps(tool.get("input_schema") or {}),
             }
             for tool in tools
             if isinstance(tool, dict) and tool.get("name")
@@ -233,6 +294,26 @@ def convert_messages(messages: list[Any]) -> list[dict[str, Any]]:
                             "inline_data": {
                                 "mime_type": str(block["source"].get("media_type") or ""),
                                 "data": str(block["source"].get("data") or ""),
+                            },
+                        }
+                    )
+                elif (
+                    block_type == "image"
+                    and isinstance(block.get("source"), dict)
+                    and block["source"].get("type") == "url"
+                    and block["source"].get("url")
+                ):
+                    text_parts.append(
+                        {
+                            "thought": False,
+                            "file_data": {
+                                "file_uri": str(block["source"].get("url") or ""),
+                                "mime_type": str(
+                                    block["source"].get("media_type")
+                                    or _guess_image_mime_type(
+                                        str(block["source"].get("url") or "")
+                                    )
+                                ),
                             },
                         }
                     )
@@ -378,10 +459,11 @@ def iter_anthropic_sse_events(
     model: str,
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     started = False
+    next_block_index = 0
 
     for raw_line in response.iter_lines(decode_unicode=True):
         line = (raw_line or "").strip()
-        if not line:
+        if not line or line.startswith(":"):
             continue
 
         json_text = line[5:].strip() if line.startswith("data:") else line
@@ -393,26 +475,30 @@ def iter_anthropic_sse_events(
         except json.JSONDecodeError:
             continue
 
-        if isinstance(payload, dict) and payload.get("turn_complete"):
+        wrapped_raw = payload.get("raw_response_json") if isinstance(payload, dict) else None
+        if isinstance(payload, dict) and payload.get("turn_complete") and wrapped_raw is None:
             continue
 
-        wrapped_raw = payload.get("raw_response_json") if isinstance(payload, dict) else None
         raw_event = _parse_raw_event(wrapped_raw if wrapped_raw is not None else payload)
         if not raw_event:
             continue
 
-        event_type = str(raw_event.get("type") or "message_delta")
-        if not started and event_type != "message_start":
-            started = True
-            yield "message_start", _fallback_message_start(model)
+        expanded_events, next_block_index = _expand_raw_payload_to_anthropic_events(
+            raw_event,
+            next_block_index=next_block_index,
+        )
+        for event_name, event_payload in expanded_events:
+            if not started and event_name != "message_start":
+                started = True
+                yield "message_start", _fallback_message_start(model)
 
-        if event_type == "message_start":
-            started = True
-            message = raw_event.get("message")
-            if isinstance(message, dict):
-                message["model"] = model
+            if event_name == "message_start":
+                started = True
+                message = event_payload.get("message")
+                if isinstance(message, dict):
+                    message["model"] = model
 
-        yield event_type, raw_event
+            yield event_name, event_payload
 
 
 def iter_anthropic_sse_bytes(
@@ -677,3 +763,269 @@ def _fallback_message_start(model: str) -> dict[str, Any]:
             },
         },
     }
+
+
+def _map_vendor_finish_reason(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"stop", "stop_sequence", "end_turn"}:
+        return "end_turn"
+    if normalized in {"max_tokens", "length"}:
+        return "max_tokens"
+    if normalized in {"tool_use", "tool_calls", "function_call"}:
+        return "tool_use"
+    if normalized == "content_filter":
+        return "content_filter"
+    return None
+
+
+def _usage_from_openai_payload(payload: dict[str, Any]) -> dict[str, int] | None:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    prompt_tokens = _as_usage_int(usage.get("prompt_tokens"))
+    completion_tokens = _as_usage_int(usage.get("completion_tokens"))
+    total_tokens = _as_usage_int(usage.get("total_tokens"))
+    if prompt_tokens <= 0 and completion_tokens <= 0 and total_tokens <= 0:
+        return None
+    return {
+        "input_tokens": prompt_tokens,
+        "output_tokens": completion_tokens,
+    }
+
+
+def _usage_from_gemini_payload(payload: dict[str, Any]) -> dict[str, int] | None:
+    usage = payload.get("usageMetadata", payload.get("usage_metadata"))
+    if not isinstance(usage, dict):
+        return None
+    prompt_tokens = _as_usage_int(
+        usage.get("promptTokenCount", usage.get("prompt_token_count"))
+    )
+    candidate_tokens = _as_usage_int(
+        usage.get("candidatesTokenCount", usage.get("candidates_token_count"))
+    )
+    thoughts_tokens = _as_usage_int(
+        usage.get("thoughtsTokenCount", usage.get("thoughts_token_count"))
+    )
+    if prompt_tokens <= 0 and candidate_tokens <= 0 and thoughts_tokens <= 0:
+        return None
+    return {
+        "input_tokens": prompt_tokens,
+        "output_tokens": candidate_tokens + thoughts_tokens,
+    }
+
+
+def _expand_raw_payload_to_anthropic_events(
+    raw_event: dict[str, Any],
+    *,
+    next_block_index: int,
+) -> tuple[list[tuple[str, dict[str, Any]]], int]:
+    if raw_event.get("type"):
+        return [
+            (
+                str(raw_event.get("type") or "message_delta"),
+                raw_event,
+            )
+        ], next_block_index
+
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    candidates = raw_event.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        candidate = candidates[0] if isinstance(candidates[0], dict) else {}
+        content = candidate.get("content") if isinstance(candidate, dict) else {}
+        if not isinstance(content, dict):
+            content = {}
+        parts = content.get("parts")
+        if not isinstance(parts, list):
+            parts = []
+
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+
+            text = part.get("text")
+            if text is not None:
+                block_type = "thinking" if bool(part.get("thought")) else "text"
+                events.append(
+                    (
+                        "content_block_start",
+                        {
+                            "index": next_block_index,
+                            "content_block": {"type": block_type},
+                        },
+                    )
+                )
+                delta_payload: dict[str, Any] = {
+                    "index": next_block_index,
+                    "delta": (
+                        {"thinking": str(text or "")}
+                        if block_type == "thinking"
+                        else {"text": str(text or "")}
+                    ),
+                }
+                thought_signature = part.get(
+                    "thoughtSignature",
+                    part.get("thought_signature"),
+                )
+                if thought_signature:
+                    delta_payload["delta"]["signature"] = str(thought_signature)
+                events.append(("content_block_delta", delta_payload))
+                events.append(("content_block_stop", {"index": next_block_index}))
+                next_block_index += 1
+                continue
+
+            function_call = part.get("functionCall", part.get("function_call"))
+            if isinstance(function_call, dict):
+                tool_id = str(
+                    function_call.get("id")
+                    or function_call.get("callId")
+                    or function_call.get("name")
+                    or uuid.uuid4().hex
+                )
+                tool_name = str(function_call.get("name") or "")
+                args_value = function_call.get("args")
+                if args_value is None:
+                    args_value = function_call.get("argsJson")
+                events.append(
+                    (
+                        "content_block_start",
+                        {
+                            "index": next_block_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": tool_name,
+                            },
+                        },
+                    )
+                )
+                args_json = (
+                    args_value
+                    if isinstance(args_value, str)
+                    else json.dumps(args_value or {}, ensure_ascii=False)
+                )
+                if args_json:
+                    events.append(
+                        (
+                            "content_block_delta",
+                            {
+                                "index": next_block_index,
+                                "delta": {"partial_json": args_json},
+                            },
+                        )
+                    )
+                events.append(("content_block_stop", {"index": next_block_index}))
+                next_block_index += 1
+
+        finish_reason = _map_vendor_finish_reason(
+            candidate.get("finishReason", raw_event.get("finishReason"))
+            if isinstance(candidate, dict)
+            else raw_event.get("finishReason")
+        )
+        usage = _usage_from_gemini_payload(raw_event)
+        if finish_reason or usage:
+            payload: dict[str, Any] = {}
+            if finish_reason:
+                payload["delta"] = {"stop_reason": finish_reason}
+            if usage:
+                payload["usage"] = usage
+            events.append(("message_delta", payload))
+
+        return events, next_block_index
+
+    choices = raw_event.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        delta = choice.get("delta") if isinstance(choice, dict) else {}
+        if not isinstance(delta, dict):
+            delta = {}
+        message = choice.get("message") if isinstance(choice, dict) else {}
+        if not isinstance(message, dict):
+            message = {}
+
+        text = delta.get("content")
+        if text is None:
+            text = message.get("content")
+        if text is not None:
+            events.append(
+                (
+                    "content_block_start",
+                    {
+                        "index": next_block_index,
+                        "content_block": {"type": "text"},
+                    },
+                )
+            )
+            events.append(
+                (
+                    "content_block_delta",
+                    {
+                        "index": next_block_index,
+                        "delta": {"text": str(text or "")},
+                    },
+                )
+            )
+            events.append(("content_block_stop", {"index": next_block_index}))
+            next_block_index += 1
+
+        tool_calls = delta.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                if not isinstance(function, dict):
+                    continue
+                tool_name = str(function.get("name") or "").strip()
+                if not tool_name:
+                    continue
+                tool_id = str(tool_call.get("id") or uuid.uuid4().hex)
+                args_value = function.get("arguments")
+                args_json = (
+                    args_value
+                    if isinstance(args_value, str)
+                    else json.dumps(args_value or {}, ensure_ascii=False)
+                )
+                events.append(
+                    (
+                        "content_block_start",
+                        {
+                            "index": next_block_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": tool_name,
+                            },
+                        },
+                    )
+                )
+                if args_json:
+                    events.append(
+                        (
+                            "content_block_delta",
+                            {
+                                "index": next_block_index,
+                                "delta": {"partial_json": args_json},
+                            },
+                        )
+                    )
+                events.append(("content_block_stop", {"index": next_block_index}))
+                next_block_index += 1
+
+        finish_reason = _map_vendor_finish_reason(
+            choice.get("finish_reason") if isinstance(choice, dict) else None
+        )
+        usage = _usage_from_openai_payload(raw_event)
+        if finish_reason or usage:
+            payload: dict[str, Any] = {}
+            if finish_reason:
+                payload["delta"] = {"stop_reason": finish_reason}
+            if usage:
+                payload["usage"] = usage
+            events.append(("message_delta", payload))
+
+    return events, next_block_index

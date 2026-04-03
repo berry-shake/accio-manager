@@ -659,8 +659,9 @@
       <div class="meta" style="margin-top: 16px; color: rgba(255,255,255,0.75);">
         自动禁用: {{ "开启" if auto_disable_on_empty_quota else "关闭" }} /
         自动恢复: {{ "开启" if auto_enable_on_recovered_quota else "关闭" }}<br>
-        API 路径: {{ api_base_url }}/v1/messages<br>
-        模型: {{ supported_models_text }} / 调度策略: {{ api_account_strategy_label }} / API Key: 管理员密码<br>
+        API 路径: {{ api_base_url }}/v1/messages / {{ api_base_url }}/v1/chat/completions / {{ api_base_url }}/v1/responses / {{ api_base_url }}/v1beta/models/...:generateContent<br>
+        文本模型: {{ supported_models_text }} / Gemini 生图模型: gemini-3-pro-image-preview、gemini-3.1-flash-image-preview<br>
+        调度策略: {{ api_account_strategy_label }} / API Key: 管理员密码<br>
         上游代理: {{ upstream_proxy_url or "未配置" }}
       </div>
 
@@ -729,7 +730,7 @@
           </table>
         </div>
         {% else %}
-        <div class="empty">还没有任何 `/v1/messages` 日志。</div>
+        <div class="empty">还没有任何 Anthropic / OpenAI / Gemini 兼容调用日志。</div>
         {% endif %}
       </div>
       {% elif current_view == "stats" %}
@@ -792,7 +793,7 @@
           </table>
         </div>
         {% else %}
-        <div class="empty">还没有任何 `/v1/messages` 调用统计。</div>
+        <div class="empty">还没有任何 Anthropic / OpenAI / Gemini 兼容调用统计。</div>
         {% endif %}
       </div>
 
@@ -837,6 +838,8 @@
           本地回调地址：<strong>{{ callback_url }}</strong><br>
           OAuth 登录页：<strong>{{ oauth_url }}</strong><br>
           Anthropic 兼容 API：<strong>{{ api_base_url }}/v1/models</strong> / <strong>{{ api_base_url }}/v1/messages</strong><br>
+          OpenAI 兼容 API：<strong>{{ api_base_url }}/v1/models</strong> / <strong>{{ api_base_url }}/v1/chat/completions</strong> / <strong>{{ api_base_url }}/v1/responses</strong><br>
+          Gemini 兼容 API：<strong>{{ api_base_url }}/v1beta/models</strong> / <strong>{{ api_base_url }}/v1beta/models/{model}:generateContent</strong><br>
           调用鉴权使用 <code>x-api-key</code> 或 <code>Authorization: Bearer</code>，值为当前管理员密码。<br>
           上游代理支持 <code>http://</code>、<code>https://</code>、<code>socks5://</code>、<code>socks5h://</code>、<code>socks4://</code>、<code>socks4a://</code>。
         </div>
