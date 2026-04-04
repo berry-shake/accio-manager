@@ -127,9 +127,18 @@ class AccioClient:
         }
         return self._request_json(
             "GET",
-            f"{self.settings.base_url}/api/entitlement/quota",
+            f"{self.settings.base_url}/api/entitlement/currentSubscription",
             params=params,
-            headers=self.get_headers(account.utdid),
+            headers={
+                **self.get_headers(
+                    account.utdid,
+                    accept="*/*",
+                    cna=self._extract_cookie_value(account.cookie, "cna"),
+                    user_agent="node",
+                ),
+                "accept-language": "*",
+                "sec-fetch-mode": "cors",
+            },
             proxy_url=proxy_url,
         )
 

@@ -2,7 +2,7 @@
   "upstreamProxyUrl": "",
   "autoDisableOnEmptyQuota": true,
   "autoEnableOnRecoveredQuota": true,
-  "apiAccountStrategy": "fill",
+  "apiAccountStrategy": "round_robin",
   "adminPassword": "change-me",
   "sessionSecret": "replace-with-a-random-secret"
 }

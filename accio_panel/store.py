@@ -6,7 +6,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .models import Account, normalize_fill_priority, normalize_timestamp, now_text
+from .models import (
+    Account,
+    normalize_fill_priority,
+    normalize_model_key,
+    normalize_timestamp,
+    now_text,
+)
 from .utils import new_utdid
 
 
@@ -214,8 +220,10 @@ class AccountStore:
                         imported.auto_disabled_reason if imported.auto_disabled else None
                     )
                     existing.last_quota_check_at = imported.last_quota_check_at
+                    existing.last_remaining_quota = imported.last_remaining_quota
                     existing.next_quota_check_at = imported.next_quota_check_at
                     existing.next_quota_check_reason = imported.next_quota_check_reason
+                    existing.disabled_models = dict(imported.disabled_models)
                     existing.added_at = imported.added_at or existing.added_at
                     existing.updated_at = now
                     self._write_account_unlocked(existing)
@@ -352,6 +360,38 @@ class AccountStore:
                 return None
             account.auto_disabled = auto_disabled
             account.auto_disabled_reason = reason if auto_disabled else None
+            account.updated_at = now_text()
+            self._write_account_unlocked(account)
+            return account
+
+    def set_disabled_model(
+        self,
+        account_id: str,
+        model_name: str,
+        reason: str | None = None,
+    ) -> Account | None:
+        with self._lock:
+            account = self.get_account(account_id)
+            if not account:
+                return None
+
+            normalized_model = normalize_model_key(model_name)
+            if not normalized_model:
+                return account
+
+            account.disabled_models = dict(account.disabled_models)
+            account.disabled_models[normalized_model] = str(reason or "").strip()
+            account.updated_at = now_text()
+            self._write_account_unlocked(account)
+            return account
+
+    def clear_disabled_models(self, account_id: str) -> Account | None:
+        with self._lock:
+            account = self.get_account(account_id)
+            if not account:
+                return None
+
+            account.disabled_models = {}
             account.updated_at = now_text()
             self._write_account_unlocked(account)
             return account

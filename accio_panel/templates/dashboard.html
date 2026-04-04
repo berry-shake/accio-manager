@@ -639,8 +639,8 @@
 
       <div class="stats">
         <div class="stat">
-          <div class="stat-label">账号总数 / 总额度</div>
-          <div class="stat-value">{{ account_count }}（启用 {{ enabled_account_count }}）/ {% if total_remaining_quota is not none %}{{ total_remaining_quota }}%{% else %}-{% endif %}</div>
+          <div class="stat-label">账号总数 / 总剩余额度</div>
+          <div class="stat-value">{{ account_count }}（启用 {{ enabled_account_count }}）/ {% if total_remaining_quota is not none %}{{ total_remaining_quota }}{% else %}-{% endif %}</div>
         </div>
         <div class="stat">
           <div class="stat-label">回调地址</div>
@@ -949,7 +949,7 @@
                 <button class="mini-action" type="button" onclick='refreshQuota({{ account.id|tojson }}, {{ account.name|tojson }})'>刷新额度</button>
               </div>
               <div class="progress {{ account.quota.level }}" id="quota-progress-{{ account.id }}">
-                <span id="quota-progress-bar-{{ account.id }}" style="width: {{ account.quota.remaining_value }}%"></span>
+                <span id="quota-progress-bar-{{ account.id }}" style="width: {{ account.quota.remaining_ratio }}%"></span>
               </div>
               <div class="meta" style="margin-top: 10px;" id="quota-reset-{{ account.id }}">
                 重置时间: {{ account.quota.reset_text }}
@@ -1284,7 +1284,8 @@
           ['更新时间', account.updatedAt],
           ['上次额度检查', account.lastQuotaCheckAt],
           ['下次额度检查', account.nextQuotaCheckAt],
-          ['检查原因', account.nextQuotaCheckReason]
+          ['检查原因', account.nextQuotaCheckReason],
+          ['模型禁用', Array.isArray(account.disabledModels) && account.disabledModels.length ? account.disabledModels.map((item) => item.reason ? `${item.model}（${item.reason}）` : item.model).join('；') : '-']
         ];
 
         const grid = document.getElementById('detail-grid');
@@ -1487,7 +1488,7 @@
         progress.className = `progress ${quota.level}`;
       }
       if (progressBar) {
-        progressBar.style.width = `${quota.remaining_value}%`;
+        progressBar.style.width = `${quota.remaining_ratio}%`;
       }
       if (reset) {
         reset.textContent = `重置时间: ${quota.reset_text}`;

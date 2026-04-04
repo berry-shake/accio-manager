@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 
 DEFAULT_ADMIN_PASSWORD = "admin"
-DEFAULT_API_ACCOUNT_STRATEGY = "fill"
+DEFAULT_API_ACCOUNT_STRATEGY = "round_robin"
 API_ACCOUNT_STRATEGIES = {"fill", "round_robin"}
 PROXY_SCHEMES = {
     "http",

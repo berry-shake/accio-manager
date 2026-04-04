@@ -7,6 +7,7 @@ import threading
 import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
@@ -74,7 +75,7 @@ from .openai_proxy import (
 )
 from .store import AccountStore
 from .usage_stats import UsageStatsStore
-from .utils import format_countdown_hours, format_timestamp, mask_token
+from .utils import format_timestamp, mask_token
 
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -197,6 +198,63 @@ def _import_callback_account(
 
 def _now_timestamp() -> int:
     return int(time.time())
+
+
+def _normalize_target_model(
+    model_name: str | None,
+    *,
+    provider: str | None = None,
+) -> str:
+    if provider == "gemini":
+        return normalize_gemini_model_name(model_name)
+    return str(model_name or "").strip().lower()
+
+
+def _disabled_model_items(account: Account) -> list[dict[str, str]]:
+    disabled_models = (
+        account.disabled_models if isinstance(account.disabled_models, dict) else {}
+    )
+    return [
+        {"model": model_name, "reason": str(reason or "").strip()}
+        for model_name, reason in sorted(disabled_models.items())
+        if str(model_name or "").strip()
+    ]
+
+
+def _account_model_disabled_reason(
+    account: Account,
+    model_name: str | None,
+    *,
+    provider: str | None = None,
+) -> str | None:
+    normalized_model = _normalize_target_model(model_name, provider=provider)
+    if not normalized_model:
+        return None
+
+    disabled_models = (
+        account.disabled_models if isinstance(account.disabled_models, dict) else {}
+    )
+    reason = str(disabled_models.get(normalized_model) or "").strip()
+    return reason or None
+
+
+def _disable_account_model_on_empty_response(
+    store: AccountStore,
+    account: Account,
+    model_name: str,
+    *,
+    provider: str | None = None,
+) -> Account:
+    normalized_model = _normalize_target_model(model_name, provider=provider)
+    if not normalized_model:
+        return account
+
+    if _account_model_disabled_reason(account, normalized_model, provider=provider):
+        return account
+
+    reason = f"模型 {normalized_model} 出现空回复，已自动禁用该账号调用此模型。"
+    updated = store.set_disabled_model(account.id, normalized_model, reason)
+    return updated or account
 
 
 def _api_account_strategy_label(strategy: str) -> str:
@@ -508,8 +566,22 @@ def _authorize_proxy_request(
     )
 
 
-def _ordered_proxy_candidates(store: AccountStore) -> list[Account]:
-    return [account for account in store.list_accounts() if account.manual_enabled]
+def _ordered_proxy_candidates(
+    store: AccountStore,
+    model_name: str | None = None,
+    *,
+    provider: str | None = None,
+) -> list[Account]:
+    return [
+        account
+        for account in store.list_accounts()
+        if account.manual_enabled
+        and not _account_model_disabled_reason(
+            account,
+            model_name,
+            provider=provider,
+        )
+    ]
 
 
 def _query_quota(
@@ -624,12 +696,24 @@ def _check_proxy_candidate(
 def _select_proxy_account(
     application: FastAPI,
     panel_settings: PanelSettings,
+    model_name: str | None = None,
+    *,
+    provider: str | None = None,
 ) -> tuple[Account, dict[str, Any]]:
     store: AccountStore = application.state.store
     client: AccioClient = application.state.client
 
-    candidates = _ordered_proxy_candidates(store)
+    candidates = _ordered_proxy_candidates(
+        store,
+        model_name,
+        provider=provider,
+    )
     if not candidates:
+        if model_name:
+            raise ProxySelectionError(
+                503,
+                f"当前没有已启用账号可用于模型 {model_name}。",
+            )
         raise ProxySelectionError(503, "当前没有已启用的账号可供 API 调用。")
 
     errors: list[str] = []
@@ -791,44 +875,107 @@ def _summarize_non_stream_payload(payload: dict[str, Any]) -> dict[str, int | bo
     }
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_subscription_entitlement(data: dict[str, Any]) -> dict[str, Any]:
+    entitlement = data.get("entitlement")
+    if not isinstance(entitlement, dict):
+        return {}
+
+    for key in ("monthly", "referral", "daily"):
+        item = entitlement.get(key)
+        if isinstance(item, dict) and any(
+            item.get(field) not in (None, "")
+            for field in ("total", "used", "remaining", "nextBillingDate")
+        ):
+            return item
+    return {}
+
+
+def _parse_billing_timestamp(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    normalized = text.replace("T", " ").replace("Z", "")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return int(datetime.strptime(normalized, fmt).timestamp())
+        except ValueError:
+            continue
+    return None
+
+
 def _build_quota_view(result: dict[str, Any]) -> dict[str, Any]:
     data = result.get("data") if isinstance(result, dict) else None
     if not isinstance(data, dict):
         data = {}
 
-    usage = data.get("usagePercent")
-    countdown = data.get("refreshCountdownSeconds")
-    usage_value = 0
+    entitlement = _extract_subscription_entitlement(data)
+    total_value = max(
+        0,
+        _as_int(data.get("total"), _as_int(entitlement.get("total"))),
+    )
+    remaining_value = max(
+        0,
+        _as_int(data.get("remaining"), _as_int(entitlement.get("remaining"))),
+    )
+    used_value = max(
+        0,
+        _as_int(
+            entitlement.get("used"),
+            max(0, total_value - remaining_value),
+        ),
+    )
+    if total_value <= 0 and (used_value > 0 or remaining_value > 0):
+        total_value = used_value + remaining_value
 
-    try:
-        usage_value = int(float(usage))
-    except (TypeError, ValueError):
-        usage_value = 0
-    usage_value = max(0, min(usage_value, 100))
-    remaining_value = max(0, 100 - usage_value)
+    remaining_ratio = (
+        max(0, min(100, round((remaining_value / total_value) * 100)))
+        if total_value > 0
+        else 0
+    )
+    next_billing_text = str(entitlement.get("nextBillingDate") or "").strip()
 
     if result.get("success"):
         level = "low"
-        if remaining_value < 20:
+        if remaining_ratio < 20:
             level = "high"
-        elif remaining_value < 50:
+        elif remaining_ratio < 50:
             level = "medium"
         return {
             "success": True,
-            "used_value": usage_value,
-            "used_text": f"{usage_value}%",
+            "total_value": total_value,
+            "used_value": used_value,
+            "used_text": (
+                f"{used_value}/{total_value}"
+                if total_value > 0
+                else str(used_value)
+            ),
             "remaining_value": remaining_value,
-            "remaining_text": f"{remaining_value}%",
-            "reset_text": format_countdown_hours(countdown),
+            "remaining_ratio": remaining_ratio,
+            "remaining_text": (
+                f"{remaining_value}/{total_value}"
+                if total_value > 0
+                else str(remaining_value)
+            ),
+            "reset_text": next_billing_text or "-",
             "level": level,
             "message": _normalize_success_message(result.get("message")),
         }
 
     return {
         "success": False,
+        "total_value": 0,
         "used_value": 0,
         "used_text": "-",
         "remaining_value": 0,
+        "remaining_ratio": 0,
         "remaining_text": "获取失败",
         "reset_text": "-",
         "level": "error",
@@ -836,24 +983,20 @@ def _build_quota_view(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _extract_countdown_seconds(result: dict[str, Any]) -> int | None:
+def _extract_next_billing_timestamp(result: dict[str, Any]) -> int | None:
     data = result.get("data") if isinstance(result, dict) else None
     if not isinstance(data, dict):
         return None
 
-    raw_countdown = data.get("refreshCountdownSeconds")
-    try:
-        countdown = int(float(raw_countdown))
-    except (TypeError, ValueError):
-        return None
-    return max(0, countdown)
+    entitlement = _extract_subscription_entitlement(data)
+    return _parse_billing_timestamp(entitlement.get("nextBillingDate"))
 
 
 def _plan_next_quota_check(
     account: Account,
     *,
     quota_success: bool,
-    countdown_seconds: int | None,
+    next_billing_at: int | None,
     panel_settings: PanelSettings,
     now_ts: int,
 ) -> tuple[int | None, str | None]:
@@ -866,9 +1009,9 @@ def _plan_next_quota_check(
     if account.auto_disabled:
         if not panel_settings.auto_enable_on_recovered_quota:
             return None, None
-        if countdown_seconds is not None:
+        if next_billing_at is not None:
             return (
-                now_ts + countdown_seconds + RECOVERY_CHECK_BUFFER_SECONDS,
+                max(now_ts + RECOVERY_CHECK_BUFFER_SECONDS, next_billing_at + RECOVERY_CHECK_BUFFER_SECONDS),
                 "等待额度重置后自动恢复检查",
             )
         return now_ts + FAILED_ACCOUNT_RETRY_SECONDS, "自动恢复重试"
@@ -883,7 +1026,7 @@ def _apply_quota_result(
     panel_settings: PanelSettings,
 ) -> tuple[Account, dict[str, Any]]:
     quota = _build_quota_view(quota_result)
-    countdown_seconds = _extract_countdown_seconds(quota_result)
+    next_billing_at = _extract_next_billing_timestamp(quota_result)
     now_ts = _now_timestamp()
     should_mark_updated = False
 
@@ -914,7 +1057,7 @@ def _apply_quota_result(
     ) = _plan_next_quota_check(
         account,
         quota_success=quota["success"],
-        countdown_seconds=countdown_seconds,
+        next_billing_at=next_billing_at,
         panel_settings=panel_settings,
         now_ts=now_ts,
     )
@@ -1244,6 +1387,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 _select_proxy_account,
                 application,
                 panel_settings,
+                normalized_model_name,
+                provider="gemini",
             )
         except ProxySelectionError as exc:
             api_log_store.record(
@@ -1381,6 +1526,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if requested_stream:
             def on_gemini_stream_complete(summary: dict[str, Any]) -> None:
                 usage = summary.get("usage") if isinstance(summary.get("usage"), dict) else {}
+                empty_response = bool(summary.get("empty_response"))
+                if empty_response:
+                    _disable_account_model_on_empty_response(
+                        store,
+                        account,
+                        normalized_model_name,
+                        provider="gemini",
+                    )
                 usage_stats_store.record_message(
                     account_id=account.id,
                     model=normalized_model_name,
@@ -1391,10 +1544,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 api_log_store.record(
                     {
-                        "level": "warn" if bool(summary.get("empty_response")) else "info",
+                        "level": "warn" if empty_response else "info",
                         "event": "gemini_generate_content",
                         "success": True,
-                        "emptyResponse": bool(summary.get("empty_response")),
+                        "emptyResponse": empty_response,
                         "accountId": account.id,
                         "accountName": account.name,
                         "fillPriority": account.fill_priority,
@@ -1402,7 +1555,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "stream": True,
                         "strategy": panel_settings.api_account_strategy,
                         "requestId": request_id,
-                        "message": "空回复" if bool(summary.get("empty_response")) else "Gemini 流式兼容调用完成",
+                        "message": (
+                            f"空回复，已禁用模型 {normalized_model_name}"
+                            if empty_response
+                            else "Gemini 流式兼容调用完成"
+                        ),
                         "statusCode": 200,
                         "stopReason": str(summary.get("stop_reason") or "STOP"),
                         "inputTokens": int(usage.get("input_tokens") or 0),
@@ -1471,6 +1628,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         usage = extract_gemini_usage(response_payload)
         output_summary = summarize_gemini_response(response_payload)
+        if output_summary["empty_response"]:
+            _disable_account_model_on_empty_response(
+                store,
+                account,
+                normalized_model_name,
+                provider="gemini",
+            )
         finish_reason = extract_gemini_finish_reason(response_payload)
         usage_stats_store.record_message(
             account_id=account.id,
@@ -1493,7 +1657,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "stream": False,
                 "strategy": panel_settings.api_account_strategy,
                 "requestId": request_id,
-                "message": "空回复" if output_summary["empty_response"] else "Gemini 兼容调用完成",
+                "message": (
+                    f"空回复，已禁用模型 {normalized_model_name}"
+                    if output_summary["empty_response"]
+                    else "Gemini 兼容调用完成"
+                ),
                 "statusCode": 200,
                 "stopReason": finish_reason,
                 "inputTokens": int(usage["input_tokens"]),
@@ -1742,6 +1910,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 _select_proxy_account,
                 application,
                 panel_settings,
+                model,
             )
         except ProxySelectionError as exc:
             api_log_store.record(
@@ -2007,6 +2176,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 _select_proxy_account,
                 application,
                 panel_settings,
+                model,
             )
         except ProxySelectionError as exc:
             api_log_store.record(
@@ -2168,6 +2338,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             def on_openai_responses_complete(summary: dict[str, Any]) -> None:
                 usage = summary.get("usage") if isinstance(summary.get("usage"), dict) else {}
                 empty_response = _is_stream_summary_empty(summary)
+                if empty_response:
+                    _disable_account_model_on_empty_response(
+                        store,
+                        account,
+                        model,
+                    )
                 usage_stats_store.record_message(
                     account_id=account.id,
                     model=model,
@@ -2189,7 +2365,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "stream": True,
                         "strategy": panel_settings.api_account_strategy,
                         "requestId": request_id,
-                        "message": "空回复" if empty_response else "Responses 流式调用完成",
+                        "message": (
+                            f"空回复，已禁用模型 {model}"
+                            if empty_response
+                            else "Responses 流式调用完成"
+                        ),
                         "statusCode": 200,
                         "stopReason": str(summary.get("stop_reason") or "end_turn"),
                         "inputTokens": int(usage.get("input_tokens") or 0),
@@ -2225,6 +2405,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not isinstance(usage, dict):
             usage = {}
         output_summary = _summarize_non_stream_payload(response_payload)
+        if output_summary["empty_response"]:
+            _disable_account_model_on_empty_response(
+                store,
+                account,
+                model,
+            )
         usage_stats_store.record_message(
             account_id=account.id,
             model=model,
@@ -2246,7 +2432,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "stream": False,
                 "strategy": panel_settings.api_account_strategy,
                 "requestId": request_id,
-                "message": "空回复" if output_summary["empty_response"] else "Responses 非流式调用完成",
+                "message": (
+                    f"空回复，已禁用模型 {model}"
+                    if output_summary["empty_response"]
+                    else "Responses 非流式调用完成"
+                ),
                 "statusCode": 200,
                 "stopReason": str(response_payload.get("stop_reason") or "end_turn"),
                 "inputTokens": int(usage.get("input_tokens") or 0),
@@ -2323,6 +2513,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 _select_proxy_account,
                 application,
                 panel_settings,
+                model,
             )
         except ProxySelectionError as exc:
             api_log_store.record(
@@ -2486,6 +2677,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             def on_openai_stream_complete(summary: dict[str, Any]) -> None:
                 usage = summary.get("usage") if isinstance(summary.get("usage"), dict) else {}
                 empty_response = _is_stream_summary_empty(summary)
+                if empty_response:
+                    _disable_account_model_on_empty_response(
+                        store,
+                        account,
+                        model,
+                    )
                 usage_stats_store.record_message(
                     account_id=account.id,
                     model=model,
@@ -2507,7 +2704,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "stream": True,
                         "strategy": panel_settings.api_account_strategy,
                         "requestId": request_id,
-                        "message": "空回复" if empty_response else "OpenAI 流式调用完成",
+                        "message": (
+                            f"空回复，已禁用模型 {model}"
+                            if empty_response
+                            else "OpenAI 流式调用完成"
+                        ),
                         "statusCode": 200,
                         "stopReason": str(summary.get("stop_reason") or "end_turn"),
                         "inputTokens": int(usage.get("input_tokens") or 0),
@@ -2542,6 +2743,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not isinstance(usage, dict):
             usage = {}
         output_summary = _summarize_non_stream_payload(response_payload)
+        if output_summary["empty_response"]:
+            _disable_account_model_on_empty_response(
+                store,
+                account,
+                model,
+            )
         usage_stats_store.record_message(
             account_id=account.id,
             model=model,
@@ -2563,7 +2770,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "stream": False,
                 "strategy": panel_settings.api_account_strategy,
                 "requestId": request_id,
-                "message": "空回复" if output_summary["empty_response"] else "OpenAI 非流式调用完成",
+                "message": (
+                    f"空回复，已禁用模型 {model}"
+                    if output_summary["empty_response"]
+                    else "OpenAI 非流式调用完成"
+                ),
                 "statusCode": 200,
                 "stopReason": str(response_payload.get("stop_reason") or "end_turn"),
                 "inputTokens": int(usage.get("input_tokens") or 0),
@@ -2783,6 +2994,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 usage = summary.get("usage") if isinstance(summary, dict) else {}
                 if not isinstance(usage, dict):
                     usage = {}
+                empty_response = _is_stream_summary_empty(summary)
+                if empty_response:
+                    _disable_account_model_on_empty_response(
+                        store,
+                        account,
+                        model,
+                    )
                 usage_stats_store.record_message(
                     account_id=account.id,
                     model=model,
@@ -2791,7 +3009,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     success=True,
                     stop_reason=str(summary.get("stop_reason") or "end_turn"),
                 )
-                empty_response = _is_stream_summary_empty(summary)
                 api_log_store.record(
                     {
                         "level": "warn" if empty_response else "info",
@@ -2805,7 +3022,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "stream": True,
                         "strategy": panel_settings.api_account_strategy,
                         "requestId": request_id,
-                        "message": "空回复" if empty_response else "流式调用完成",
+                        "message": (
+                            f"空回复，已禁用模型 {model}"
+                            if empty_response
+                            else "流式调用完成"
+                        ),
                         "statusCode": 200,
                         "stopReason": str(summary.get("stop_reason") or "end_turn"),
                         "inputTokens": int(usage.get("input_tokens") or 0),
@@ -2840,6 +3061,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not isinstance(usage, dict):
             usage = {}
         output_summary = _summarize_non_stream_payload(response_payload)
+        if output_summary["empty_response"]:
+            _disable_account_model_on_empty_response(
+                store,
+                account,
+                model,
+            )
         usage_stats_store.record_message(
             account_id=account.id,
             model=model,
@@ -2861,7 +3088,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "stream": False,
                 "strategy": panel_settings.api_account_strategy,
                 "requestId": request_id,
-                "message": "空回复" if output_summary["empty_response"] else "非流式调用完成",
+                "message": (
+                    f"空回复，已禁用模型 {model}"
+                    if output_summary["empty_response"]
+                    else "非流式调用完成"
+                ),
                 "statusCode": 200,
                 "stopReason": str(response_payload.get("stop_reason") or "end_turn"),
                 "inputTokens": int(usage.get("input_tokens") or 0),
@@ -3091,11 +3322,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 expires_at=account.expires_at,
                 cookie=account.cookie,
             )
+            had_disabled_models = bool(updated.disabled_models)
+            if had_disabled_models:
+                cleared = store.clear_disabled_models(updated.id)
+                if cleared is not None:
+                    updated = cleared
             activation_text = _activation_summary_text(activation)
             return JSONResponse(
                 {
                     "success": True,
-                    "message": f"{updated.name} 重新激活完成，{activation_text}",
+                    "message": (
+                        f"{updated.name} 重新激活完成，{activation_text}"
+                        + ("，已清空模型禁用记录" if had_disabled_models else "")
+                    ),
                 }
             )
         except Exception as exc:
@@ -3562,6 +3801,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "lastQuotaCheckAt": format_timestamp(account.last_quota_check_at),
                     "nextQuotaCheckAt": format_timestamp(account.next_quota_check_at),
                     "nextQuotaCheckReason": account.next_quota_check_reason or "-",
+                    "disabledModels": _disabled_model_items(account),
                     "status": _account_status_view(account),
                 },
                 "quota": quota,

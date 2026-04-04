@@ -34,6 +34,31 @@ def normalize_fill_priority(value: Any) -> int:
     return max(0, priority)
 
 
+def normalize_model_key(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def normalize_disabled_models(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        normalized: dict[str, str] = {}
+        for model_name, reason in value.items():
+            key = normalize_model_key(model_name)
+            if not key:
+                continue
+            normalized[key] = str(reason or "").strip()
+        return normalized
+
+    if isinstance(value, list):
+        normalized = {}
+        for model_name in value:
+            key = normalize_model_key(model_name)
+            if key:
+                normalized[key] = ""
+        return normalized
+
+    return {}
+
+
 @dataclass(slots=True)
 class Account:
     id: str
@@ -51,6 +76,7 @@ class Account:
     last_remaining_quota: int | None = None
     next_quota_check_at: int | None = None
     next_quota_check_reason: str | None = None
+    disabled_models: dict[str, str] = field(default_factory=dict)
     added_at: str = field(default_factory=now_text)
     updated_at: str = field(default_factory=now_text)
 
@@ -72,6 +98,9 @@ class Account:
             last_remaining_quota=data.get("lastRemainingQuota"),
             next_quota_check_at=normalize_timestamp(data.get("nextQuotaCheckAt")),
             next_quota_check_reason=data.get("nextQuotaCheckReason"),
+            disabled_models=normalize_disabled_models(
+                data.get("disabledModels", data.get("disabledModelReasons"))
+            ),
             added_at=str(data.get("addedAt") or now_text()),
             updated_at=str(data.get("updatedAt") or data.get("addedAt") or now_text()),
         )
@@ -93,6 +122,7 @@ class Account:
             "lastRemainingQuota": self.last_remaining_quota,
             "nextQuotaCheckAt": self.next_quota_check_at,
             "nextQuotaCheckReason": self.next_quota_check_reason,
+            "disabledModels": self.disabled_models,
             "addedAt": self.added_at,
             "updatedAt": self.updated_at,
         }
