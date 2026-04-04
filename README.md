@@ -54,15 +54,29 @@ uv run python main.py
 
 ## Docker
 
-本地构建：
+直接拉取镜像（推荐）：
+
+```bash
+docker pull ghcr.io/guji08233/accio-manager:latest
+```
+
+运行：
+
+```bash
+docker run -d \
+  --name accio-panel \
+  -p 4097:4097 \
+  -v accio-panel-data:/app/data \
+  -e ACCIO_CALLBACK_HOST=127.0.0.1 \
+  ghcr.io/guji08233/accio-manager:latest
+```
+
+镜像由 GitHub Actions 自动构建，推送到 `main` 分支后会自动更新。
+
+如需本地构建：
 
 ```bash
 docker build -t accio-panel:latest .
-```
-
-本地运行：
-
-```bash
 docker run -d \
   --name accio-panel \
   -p 4097:4097 \
