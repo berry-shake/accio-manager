@@ -39,6 +39,7 @@ from .anthropic_proxy import (
     build_accio_request,
     build_models_payload,
     decode_non_stream_response,
+    estimate_anthropic_input_tokens,
     iter_anthropic_sse_bytes,
 )
 from .client import AccioClient
@@ -1283,6 +1284,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "x-accio-account-id",
                 "x-accio-account-strategy",
                 "x-accio-account-remaining",
+                "x-accio-count-strategy",
             ],
         )
     application.state.settings = settings
@@ -3202,6 +3204,84 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return JSONResponse(response_payload, headers=response_headers)
 
+    @application.post("/v1/messages/count_tokens")
+    async def anthropic_count_tokens(request: Request) -> JSONResponse:
+        panel_settings = panel_settings_store.load()
+        api_log_store: ApiLogStore = application.state.api_log_store
+        unauthorized = _authorize_proxy_request(request, panel_settings)
+        if unauthorized:
+            return unauthorized
+
+        started_at = time.perf_counter()
+
+        raw_body = await request.body()
+        if not raw_body.strip():
+            return _anthropic_error_response(
+                400,
+                "请求体不能为空。",
+                error_type="invalid_request_error",
+            )
+
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return _anthropic_error_response(
+                400,
+                "请求体必须是合法的 JSON。",
+                error_type="invalid_request_error",
+            )
+
+        if not isinstance(payload, dict):
+            return _anthropic_error_response(
+                400,
+                "请求体必须是 JSON 对象。",
+                error_type="invalid_request_error",
+            )
+
+        model = str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL)
+        messages_value = payload.get("messages")
+        messages_count = len(messages_value) if isinstance(messages_value, list) else 0
+        allowed, available = _is_allowed_dynamic_model(
+            application,
+            panel_settings,
+            model,
+        )
+        if not allowed:
+            return _anthropic_error_response(
+                400,
+                f"不支持模型 {model}。当前可用模型: {', '.join(available)}",
+                error_type="invalid_request_error",
+            )
+
+        input_tokens = estimate_anthropic_input_tokens(payload)
+        response = JSONResponse({"input_tokens": input_tokens})
+        response.headers["x-accio-count-strategy"] = "heuristic"
+        api_log_store.record(
+            {
+                "level": "info",
+                "event": "v1_messages_count_tokens",
+                "success": True,
+                "emptyResponse": False,
+                "accountId": "",
+                "accountName": "-",
+                "fillPriority": None,
+                "model": model,
+                "stream": False,
+                "strategy": panel_settings.api_account_strategy,
+                "requestId": "",
+                "message": "Messages Token 计数完成（启发式估算）",
+                "statusCode": 200,
+                "stopReason": "count_tokens",
+                "inputTokens": input_tokens,
+                "outputTokens": 0,
+                "remainingQuota": None,
+                "usedQuota": None,
+                "messagesCount": messages_count,
+                "durationMs": int((time.perf_counter() - started_at) * 1000),
+            }
+        )
+        return response
+
     @application.patch("/api/settings")
     def update_settings(
         request: Request,
@@ -3952,6 +4032,7 @@ def run() -> None:
     print(f"OAuth 页面: http://{settings.callback_host}:{settings.callback_port}/oauth")
     print(f"本地回调: {settings.callback_url}")
     print(f"Anthropic API: {effective_api_base_url}/v1/messages")
+    print(f"Anthropic Count API: {effective_api_base_url}/v1/messages/count_tokens")
     print(f"OpenAI Chat API: {effective_api_base_url}/v1/chat/completions")
     print(f"OpenAI Responses API: {effective_api_base_url}/v1/responses")
     print(f"模型列表: {effective_api_base_url}/v1/models")

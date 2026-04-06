@@ -195,6 +195,133 @@ def build_accio_request(
     return request_body
 
 
+def _estimate_text_tokens(value: Any) -> int:
+    text = str(value or "")
+    if not text:
+        return 0
+
+    utf8_bytes = len(text.encode("utf-8"))
+    ascii_words = len(re.findall(r"[A-Za-z0-9_]+", text))
+    cjk_chars = len(
+        re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text)
+    )
+    estimated = max((utf8_bytes + 3) // 4, ascii_words)
+    estimated += (cjk_chars + 3) // 4
+    return max(1, estimated)
+
+
+def _estimate_base64_bytes(value: Any) -> int:
+    data = re.sub(r"\s+", "", str(value or ""))
+    if not data:
+        return 0
+    padding = len(data) - len(data.rstrip("="))
+    return max(0, (len(data) * 3) // 4 - padding)
+
+
+def _estimate_image_tokens(part: dict[str, Any]) -> int:
+    inline_data = part.get("inline_data")
+    if isinstance(inline_data, dict):
+        byte_size = _estimate_base64_bytes(inline_data.get("data"))
+        if byte_size > 0:
+            return max(256, min(4096, 128 + ((byte_size + 1023) // 1024)))
+        return 1024
+
+    if isinstance(part.get("file_data"), dict):
+        return 1024
+
+    return 0
+
+
+def _estimate_accio_part_tokens(part: dict[str, Any]) -> int:
+    total = 0
+
+    if part.get("text") is not None:
+        total += _estimate_text_tokens(part.get("text")) + 1
+
+    function_call = part.get("functionCall")
+    if isinstance(function_call, dict):
+        total += 10
+        total += _estimate_text_tokens(function_call.get("id"))
+        total += _estimate_text_tokens(function_call.get("name"))
+        total += _estimate_text_tokens(function_call.get("argsJson"))
+
+    function_response = part.get("functionResponse")
+    if isinstance(function_response, dict):
+        total += 10
+        total += _estimate_text_tokens(function_response.get("id"))
+        total += _estimate_text_tokens(function_response.get("name"))
+        total += _estimate_text_tokens(function_response.get("responseJson"))
+
+    image_tokens = _estimate_image_tokens(part)
+    if image_tokens > 0:
+        total += image_tokens
+        total += _estimate_text_tokens(
+            (
+                part.get("inline_data", {}) or part.get("file_data", {})
+            ).get("mime_type")
+        )
+
+    if part.get("thoughtSignature") is not None:
+        total += _estimate_text_tokens(part.get("thoughtSignature")) + 2
+
+    return max(1, total) if total > 0 else 0
+
+
+def estimate_accio_input_tokens(request_body: dict[str, Any]) -> int:
+    total = 0
+
+    system_text = request_body.get("system_instruction")
+    if system_text:
+        total += _estimate_text_tokens(system_text) + 4
+
+    tools = request_body.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            total += 16
+            total += _estimate_text_tokens(tool.get("name"))
+            total += _estimate_text_tokens(tool.get("description"))
+            total += _estimate_text_tokens(tool.get("parametersJson"))
+
+    contents = request_body.get("contents")
+    if isinstance(contents, list):
+        for content in contents:
+            if not isinstance(content, dict):
+                continue
+            total += 4
+            total += _estimate_text_tokens(content.get("role"))
+
+            metadata = content.get("metadata")
+            if isinstance(metadata, dict):
+                total += _estimate_text_tokens(metadata.get("textThoughtSignature"))
+
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if isinstance(part, dict):
+                    total += _estimate_accio_part_tokens(part)
+
+    return max(1, total)
+
+
+def estimate_anthropic_input_tokens(body: dict[str, Any]) -> int:
+    """启发式估算 Messages API 输入 tokens。
+
+    Accio 当前没有暴露稳定可用的 countTokens 上游接口，因此这里只能基于
+    已有的消息归一化逻辑做近似估算，主要用于兼容客户端调用流程。
+    """
+
+    request_body = build_accio_request(
+        body,
+        token="",
+        utdid="",
+        version="",
+    )
+    return estimate_accio_input_tokens(request_body)
+
+
 def convert_messages(messages: list[Any]) -> list[dict[str, Any]]:
     contents: list[dict[str, Any]] = []
     for message in messages:

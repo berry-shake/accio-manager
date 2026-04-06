@@ -16,7 +16,7 @@
 - 手动启用 / 禁用账号
 - 额度耗尽自动禁用，额度恢复自动启用
 - 单后台调度器按账号下次检查时间自动巡检额度
-- Anthropic 兼容 API：`/v1/models`、`/v1/messages`
+- Anthropic 兼容 API：`/v1/models`、`/v1/messages`、`/v1/messages/count_tokens`
 - OpenAI 兼容 API：`/v1/models`、`/v1/chat/completions`
 - OpenAI Responses 兼容 API：`/v1/responses`
 - Gemini 兼容 API：`/v1beta/models`、`/v1beta/models/{model}`、`/v1beta/models/{model}:generateContent`、`/v1beta/models/{model}:streamGenerateContent`
@@ -48,6 +48,7 @@ uv run python main.py
 - `http://127.0.0.1:4097/login`
 - `http://127.0.0.1:4097/v1/models`
 - `http://127.0.0.1:4097/v1/messages`
+- `http://127.0.0.1:4097/v1/messages/count_tokens`
 - `http://127.0.0.1:4097/v1/chat/completions`
 - `http://127.0.0.1:4097/v1/responses`
 - `http://127.0.0.1:4097/v1beta/models`
@@ -129,10 +130,10 @@ admin
 - 值填写当前管理员密码
 - Gemini 兼容接口额外支持 `x-goog-api-key`、`?key=`、`?api_key=` 这几种官方常见传法
 - 如果管理员密码里包含 `+`，放到 URL Query 时请编码成 `%2B`
-- `/v1/models`、`/v1/messages`、`/v1/chat/completions`、`/v1/responses` 都需要这个鉴权
+- `/v1/models`、`/v1/messages`、`/v1/messages/count_tokens`、`/v1/chat/completions`、`/v1/responses` 都需要这个鉴权
 - `/v1beta/models`、`/v1beta/models/{model}`、`/v1beta/models/{model}:generateContent`、`/v1beta/models/{model}:streamGenerateContent` 也使用同一套鉴权
 - `/v1/models` 与 `/v1beta/models` 会优先调用 `POST /api/llm/config` 动态拉取模型目录，并缓存 60 秒
-- 动态目录可用时，`/v1/messages`、`/v1/chat/completions`、`/v1/responses`、`/v1beta/models/{model}:generateContent` 的模型校验也按该目录执行
+- 动态目录可用时，`/v1/messages`、`/v1/messages/count_tokens`、`/v1/chat/completions`、`/v1/responses`、`/v1beta/models/{model}:generateContent` 的模型校验也按该目录执行
 - 动态目录暂不可用时，列表接口会回退到内置静态模型；实际请求会继续按传入模型名直传上游
 - 响应头 `x-accio-model-source` 会标记模型目录来源：`live`、`cache`、`stale` 或 `static-fallback`
 - 模型名不会做别名改写，按请求值直接透传到上游
@@ -149,6 +150,15 @@ curl http://127.0.0.1:4097/v1/messages \
   -H "content-type: application/json" \
   -H "x-api-key: admin" \
   -d "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":256,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}"
+```
+
+Token 计数示例：
+
+```bash
+curl http://127.0.0.1:4097/v1/messages/count_tokens \
+  -H "content-type: application/json" \
+  -H "x-api-key: admin" \
+  -d "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}"
 ```
 
 Gemini 兼容调用示例：
@@ -200,6 +210,7 @@ curl http://127.0.0.1:4097/v1/messages \
 
 - 如果客户端仍发送旧格式 `thinking: {\"type\":\"enabled\",\"budget_tokens\":...}`，系统也会继续兼容
 - 非流式返回会保留 `thinking` 块；如果上游返回了 `signature`，也会一并透传
+- `/v1/messages/count_tokens` 当前为本地启发式估算，响应头会返回 `x-accio-count-strategy: heuristic`
 - `/v1/responses` 已支持基础流式事件、非流式返回，以及常见 `input` 项转换
 - `Responses input` 当前支持：纯字符串、`message`/`role` 消息项、`input_text`、`input_image`、`image_url`、`input_file`、`file`、`function_call`、`function_call_output`
 - `Responses` 额外字段如 `metadata`、`user`、`session_id`、`conversation_id`、`previous_response_id`、`include`、`truncation` 会继续向内部请求骨架透传
