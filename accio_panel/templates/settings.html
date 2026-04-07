@@ -137,6 +137,12 @@
       <p>在这里配置上游代理、自动禁用 / 自动恢复，以及 API 调度策略。</p>
 
       <div class="group">
+        <label class="label" for="accio-version">Accio 版本号</label>
+        <input id="accio-version" class="input" type="text" value="{{ panel_settings.accio_version }}" placeholder="例如 0.5.7">
+        <div class="hint">修改后保存即可生效，无需重新部署。</div>
+      </div>
+
+      <div class="group">
         <div class="check">
           <input id="auto-disable" type="checkbox" {% if panel_settings.auto_disable_on_empty_quota %}checked{% endif %}>
           <div>
@@ -163,6 +169,7 @@
 
   <script>
     async function saveSettings() {
+      const accioVersion = document.getElementById('accio-version').value.trim();
       const autoDisableOnEmptyQuota = document.getElementById('auto-disable').checked;
       const autoEnableOnRecoveredQuota = document.getElementById('auto-enable').checked;
 
@@ -173,6 +180,7 @@
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
+            accioVersion,
             autoDisableOnEmptyQuota,
             autoEnableOnRecoveredQuota
           })

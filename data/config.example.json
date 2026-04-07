@@ -4,5 +4,6 @@
   "autoEnableOnRecoveredQuota": true,
   "apiAccountStrategy": "round_robin",
   "adminPassword": "change-me",
-  "sessionSecret": "replace-with-a-random-secret"
+  "sessionSecret": "replace-with-a-random-secret",
+  "accioVersion": "0.5.7"
 }

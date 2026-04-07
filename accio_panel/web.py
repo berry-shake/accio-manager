@@ -1258,10 +1258,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     initial_panel_settings = panel_settings_store.load()
 
+    def _effective_version() -> str:
+        """版本号优先级：配置中心 > 环境变量 > 代码默认值"""
+        ps = panel_settings_store.load()
+        if ps.accio_version:
+            return ps.accio_version
+        return settings.version
+
     application = FastAPI(
         title="Accio 多账号管理面板",
         description="支持 Token 刷新、额度查看、登录链接获取与 FastAPI 回调保存。",
-        version=settings.version,
+        version=_effective_version(),
     )
     application.add_middleware(
         SessionMiddleware,
@@ -1388,13 +1395,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "callback_url": callback_url,
                 "oauth_url": "/oauth",
                 "upstream_proxy_url": panel_settings.upstream_proxy_url,
-                "version": settings.version,
+                "version": _effective_version(),
                 "base_url": settings.base_url,
                 "api_base_url": api_base_url,
                 "admin_password": panel_settings.admin_password,
                 "auto_disable_on_empty_quota": panel_settings.auto_disable_on_empty_quota,
                 "auto_enable_on_recovered_quota": panel_settings.auto_enable_on_recovered_quota,
                 "api_account_strategy": panel_settings.api_account_strategy,
+                "accio_version": panel_settings.accio_version,
                 "api_account_strategy_label": _api_account_strategy_label(
                     panel_settings.api_account_strategy
                 ),
@@ -1508,7 +1516,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             model=normalized_model_name,
             token=account.access_token,
             utdid=account.utdid,
-            version=settings.version,
+            version=_effective_version(),
         )
         request_id = str(accio_body.get("request_id") or "")
 
@@ -2026,7 +2034,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             model=model_name,
             token=account.access_token,
             utdid=account.utdid,
-            version=settings.version,
+            version=_effective_version(),
         )
         request_id = str(accio_body.get("request_id") or "")
 
@@ -2301,7 +2309,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             chat_payload,
             token=account.access_token,
             utdid=account.utdid,
-            version=settings.version,
+            version=_effective_version(),
         )
         request_id = str(accio_body.get("request_id") or "")
 
@@ -2642,7 +2650,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload,
             token=account.access_token,
             utdid=account.utdid,
-            version=settings.version,
+            version=_effective_version(),
         )
         request_id = str(accio_body.get("request_id") or "")
 
@@ -2984,7 +2992,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload,
             token=account.access_token,
             utdid=account.utdid,
-            version=settings.version,
+            version=_effective_version(),
         )
         request_id = str(accio_body.get("request_id") or "")
 
@@ -3222,6 +3230,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload.get("apiAccountStrategy")
         )
         admin_password = str(payload.get("adminPassword") or "").strip()
+        accio_version = str(
+            payload.get("accioVersion") or current_settings.accio_version
+        ).strip()
 
         try:
             normalized_upstream_proxy_url = normalize_upstream_proxy_url(upstream_proxy_url)
@@ -3239,6 +3250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 api_account_strategy=api_account_strategy,
                 admin_password=admin_password or current_settings.admin_password,
                 session_secret=current_settings.session_secret,
+                accio_version=accio_version,
             )
         )
 

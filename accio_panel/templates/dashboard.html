@@ -901,6 +901,11 @@
             </select>
             <div class="meta" style="margin-top:8px;">优先填充会先按账号优先级排序，数值越小越优先；同优先级下会优先调用剩余额度更少的账号。轮询会在可用账号之间轮转。</div>
           </div>
+          <div>
+            <label class="settings-label" for="settings-accio-version">Accio 版本号</label>
+            <input id="settings-accio-version" class="settings-input" type="text" value="{{ accio_version }}" placeholder="例如 0.5.7">
+            <div class="meta" style="margin-top:8px;">修改后保存即可生效，无需重新部署。</div>
+          </div>
           <label class="check-row">
             <input id="settings-auto-disable" type="checkbox" {% if auto_disable_on_empty_quota %}checked{% endif %}>
             <span>额度耗尽后自动禁用账号</span>
@@ -1452,6 +1457,7 @@
       const upstreamProxyUrl = document.getElementById('settings-upstream-proxy-url').value.trim();
       const adminPassword = document.getElementById('settings-admin-password').value.trim();
       const apiAccountStrategy = document.getElementById('settings-api-account-strategy').value;
+      const accioVersion = document.getElementById('settings-accio-version').value.trim();
       const autoDisableOnEmptyQuota = document.getElementById('settings-auto-disable').checked;
       const autoEnableOnRecoveredQuota = document.getElementById('settings-auto-enable').checked;
 
@@ -1465,6 +1471,7 @@
             upstreamProxyUrl,
             adminPassword,
             apiAccountStrategy,
+            accioVersion,
             autoDisableOnEmptyQuota,
             autoEnableOnRecoveredQuota
           })
