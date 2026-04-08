@@ -49,6 +49,7 @@ class PanelSettings:
     api_account_strategy: str = DEFAULT_API_ACCOUNT_STRATEGY
     admin_password: str = DEFAULT_ADMIN_PASSWORD
     session_secret: str = ""
+    accio_version: str = "0.5.7"
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "PanelSettings":
@@ -65,6 +66,7 @@ class PanelSettings:
             ),
             admin_password=str(data.get("adminPassword") or DEFAULT_ADMIN_PASSWORD),
             session_secret=str(data.get("sessionSecret") or ""),
+            accio_version=str(data.get("accioVersion") or "0.5.7").strip(),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -76,6 +78,7 @@ class PanelSettings:
             "apiAccountStrategy": payload["api_account_strategy"],
             "adminPassword": payload["admin_password"],
             "sessionSecret": payload["session_secret"],
+            "accioVersion": payload["accio_version"],
         }
 
 
