@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from typing import Any
 from typing import Callable
@@ -129,26 +130,17 @@ def anthropic_error_payload(
 def build_accio_request(
     body: dict[str, Any],
     *,
-    token: str,
-    utdid: str,
-    version: str,
+    token: str = "",
 ) -> dict[str, Any]:
     request_body: dict[str, Any] = {
-        "utdid": utdid,
-        "version": version,
-        "token": token,
-        "empid": str(body.get("empid") or ""),
-        "tenant": str(body.get("tenant") or ""),
-        "iai_tag": str(body.get("iai_tag", body.get("iaiTag")) or ""),
-        "stream": True,
+        "token": token or str(body.get("token") or ""),
         "model": body.get("model") or DEFAULT_ANTHROPIC_MODEL,
         "request_id": str(
             body.get("request_id")
             or body.get("requestId")
-            or f"req-{uuid.uuid4()}"
+            or f"user-{int(time.time() * 1000)}"
         ),
         "message_id": str(body.get("message_id", body.get("messageId")) or ""),
-        "incremental": True,
         "max_output_tokens": body.get("max_tokens") or 8192,
         "contents": [],
         "stop_sequences": _normalize_stop_sequences(
@@ -681,6 +673,17 @@ def iter_anthropic_sse_events(
         wrapped_raw = payload.get("raw_response_json") if isinstance(payload, dict) else None
         if strict_wrapped_events:
             if isinstance(payload, dict) and payload.get("turn_complete"):
+                # 如果上游返回错误，yield 错误事件而非静默返回空响应
+                error_code = str(payload.get("error_code") or "")
+                error_msg = str(payload.get("error_message") or "")
+                if error_code and error_code not in ("0", "200", ""):
+                    if not started:
+                        started = True
+                        yield "message_start", _fallback_message_start_worker(model)
+                    yield "error", anthropic_error_payload(
+                        error_msg or f"上游错误 {error_code}",
+                        error_type="api_error",
+                    )
                 continue
             if wrapped_raw is None:
                 continue
@@ -713,6 +716,20 @@ def iter_anthropic_sse_events(
             else _parse_raw_event(payload)
         )
         if not raw_event:
+            continue
+
+        # 上游返回错误（turn_complete + error_code）
+        if raw_event.get("turn_complete"):
+            error_code = str(raw_event.get("error_code") or "")
+            error_msg = str(raw_event.get("error_message") or "")
+            if error_code and error_code not in ("0", "200", ""):
+                if not started:
+                    started = True
+                    yield "message_start", _fallback_message_start(model)
+                yield "error", anthropic_error_payload(
+                    error_msg or f"上游错误 {error_code}",
+                    error_type="api_error",
+                )
             continue
 
         # 如果 payload 自身就是 Anthropic 原生格式

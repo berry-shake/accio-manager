@@ -64,6 +64,7 @@ from .model_catalog import (
     is_image_generation_model,
     list_model_names,
     list_proxy_model_names,
+    resolve_model_name,
 )
 from .models import Account
 from .openai_proxy import (
@@ -166,6 +167,15 @@ def _activate_callback_account(
     )
 
 
+def _is_default_account_name(name: str) -> bool:
+    """返回 True 表示该账号名是自动生成的默认名（如"账号1"），可以被真实用户名覆盖。"""
+    if not name or name == "未命名账号":
+        return True
+    if name.startswith("账号") and name[2:].isdigit():
+        return True
+    return False
+
+
 def _activation_summary_text(activation: dict[str, Any]) -> str:
     message = str(activation.get("message") or "").strip()
     if message:
@@ -190,6 +200,10 @@ def _import_callback_account(
         cookie=cookie,
     )
     activation = _activate_callback_account(client, account, panel_settings)
+    user_name = str(activation.get("userName") or "").strip()
+    if user_name and _is_default_account_name(account.name):
+        account.name = user_name
+        store.save(account)
     account, quota = _query_quota_with_refresh_fallback(
         store,
         client,
@@ -448,6 +462,16 @@ def _is_allowed_dynamic_model(
     if available:
         return normalized in set(available), available
     return True, []
+
+
+def _resolve_request_model(
+    name: str,
+    application: FastAPI,
+    panel_settings: PanelSettings,
+) -> str:
+    """将用户传入的友好模型名解析为上游内部代码，未命中则原样返回。"""
+    entries, _ = _load_dynamic_model_catalog(application, panel_settings)
+    return resolve_model_name(name, entries)
 
 
 def _proxy_fill_sort_key(account: Account, quota: dict[str, Any]) -> tuple[Any, ...]:
@@ -1446,6 +1470,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         normalized_model_name = normalize_gemini_model_name(model_name)
+        normalized_model_name = _resolve_request_model(normalized_model_name, application, panel_settings)
         allowed, available = _is_allowed_dynamic_model(
             application,
             panel_settings,
@@ -1517,8 +1542,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload,
             model=normalized_model_name,
             token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
         )
         request_id = str(accio_body.get("request_id") or "")
 
@@ -2035,8 +2058,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload,
             model=model_name,
             token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
         )
         request_id = str(accio_body.get("request_id") or "")
 
@@ -2239,7 +2260,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _openai_error_response(400, "请求体必须是合法的 JSON。")
         if not isinstance(payload, dict):
             return _openai_error_response(400, "请求体必须是 JSON 对象。")
-        model = str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL)
+        model = _resolve_request_model(
+            str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL),
+            application,
+            panel_settings,
+        )
+        payload["model"] = model
         disable_on_empty_response = _should_disable_model_on_empty_response(
             payload,
             model,
@@ -2307,12 +2333,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 code="proxy_selection_failed",
             )
 
-        accio_body = build_accio_request_from_openai(
-            chat_payload,
-            token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
-        )
+        accio_body = build_accio_request_from_openai(chat_payload, token=account.access_token)
         request_id = str(accio_body.get("request_id") or "")
 
         try:
@@ -2582,7 +2603,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not isinstance(payload, dict):
             return _openai_error_response(400, "请求体必须是 JSON 对象。")
 
-        model = str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL)
+        model = _resolve_request_model(
+            str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL),
+            application,
+            panel_settings,
+        )
+        payload["model"] = model
         disable_on_empty_response = _should_disable_model_on_empty_response(
             payload,
             model,
@@ -2648,12 +2674,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 code="proxy_selection_failed",
             )
 
-        accio_body = build_accio_request_from_openai(
-            payload,
-            token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
-        )
+        accio_body = build_accio_request_from_openai(payload, token=account.access_token)
         request_id = str(accio_body.get("request_id") or "")
 
         try:
@@ -2932,7 +2953,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 error_type="invalid_request_error",
             )
 
-        model = str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL)
+        model = _resolve_request_model(
+            str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL),
+            application,
+            panel_settings,
+        )
+        payload["model"] = model
         disable_on_empty_response = _should_disable_model_on_empty_response(
             payload,
             model,
@@ -2990,12 +3016,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             return _anthropic_error_response(exc.status_code, exc.message)
 
-        accio_body = build_accio_request(
-            payload,
-            token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
-        )
+        accio_body = build_accio_request(payload, token=account.access_token)
         request_id = str(accio_body.get("request_id") or "")
 
         try:

@@ -693,9 +693,7 @@ def _convert_openai_tools(body: dict[str, Any]) -> list[dict[str, Any]]:
 def build_accio_request_from_openai(
     body: dict[str, Any],
     *,
-    token: str,
-    utdid: str,
-    version: str,
+    token: str = "",
 ) -> dict[str, Any]:
     system_text, messages = _convert_openai_messages(body)
     properties = body.get("properties")
@@ -752,12 +750,7 @@ def build_accio_request_from_openai(
     if tools:
         anthropic_body["tools"] = tools
 
-    return build_accio_request(
-        anthropic_body,
-        token=token,
-        utdid=utdid,
-        version=version,
-    )
+    return build_accio_request(anthropic_body, token=token)
 
 
 def convert_responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
