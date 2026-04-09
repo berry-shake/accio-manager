@@ -63,6 +63,7 @@ from .model_catalog import (
     is_image_generation_model,
     list_model_names,
     list_proxy_model_names,
+    resolve_model_name,
 )
 from .models import Account
 from .openai_proxy import (
@@ -460,6 +461,16 @@ def _is_allowed_dynamic_model(
     if available:
         return normalized in set(available), available
     return True, []
+
+
+def _resolve_request_model(
+    name: str,
+    application: FastAPI,
+    panel_settings: PanelSettings,
+) -> str:
+    """将用户传入的友好模型名解析为上游内部代码，未命中则原样返回。"""
+    entries, _ = _load_dynamic_model_catalog(application, panel_settings)
+    return resolve_model_name(name, entries)
 
 
 def _proxy_fill_sort_key(account: Account, quota: dict[str, Any]) -> tuple[Any, ...]:
@@ -1457,6 +1468,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         normalized_model_name = normalize_gemini_model_name(model_name)
+        normalized_model_name = _resolve_request_model(normalized_model_name, application, panel_settings)
         allowed, available = _is_allowed_dynamic_model(
             application,
             panel_settings,
@@ -2244,7 +2256,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _openai_error_response(400, "请求体必须是合法的 JSON。")
         if not isinstance(payload, dict):
             return _openai_error_response(400, "请求体必须是 JSON 对象。")
-        model = str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL)
+        model = _resolve_request_model(
+            str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL),
+            application,
+            panel_settings,
+        )
+        payload["model"] = model
         disable_on_empty_response = _should_disable_model_on_empty_response(
             payload,
             model,
@@ -2582,7 +2599,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not isinstance(payload, dict):
             return _openai_error_response(400, "请求体必须是 JSON 对象。")
 
-        model = str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL)
+        model = _resolve_request_model(
+            str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL),
+            application,
+            panel_settings,
+        )
+        payload["model"] = model
         disable_on_empty_response = _should_disable_model_on_empty_response(
             payload,
             model,
@@ -2927,7 +2949,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 error_type="invalid_request_error",
             )
 
-        model = str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL)
+        model = _resolve_request_model(
+            str(payload.get("model") or DEFAULT_ANTHROPIC_MODEL),
+            application,
+            panel_settings,
+        )
+        payload["model"] = model
         disable_on_empty_response = _should_disable_model_on_empty_response(
             payload,
             model,

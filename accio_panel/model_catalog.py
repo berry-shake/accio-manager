@@ -26,6 +26,27 @@ def is_image_generation_model(model_name: Any) -> bool:
     return "image-preview" in normalized
 
 
+def _display_name_to_friendly(display_name: str, provider: str) -> str:
+    """将 modelDisplayName 转换为友好模型名，如 'Claude Sonnet 4.6' → 'claude-sonnet-4-6'。"""
+    name = display_name.strip().lower().replace(" ", "-")
+    if provider == "claude":
+        # Claude 模型版本号中的点改为连字符：4.6 → 4-6
+        name = name.replace(".", "-")
+    return name
+
+
+def resolve_model_name(name: str, catalog: list[dict[str, Any]]) -> str:
+    """将友好名称或内部代码解析为实际发送给上游的 modelName。
+
+    若 name 匹配某条目的 friendlyName，返回对应 modelName（内部代码）；
+    否则原样返回（调用方传入的已经是内部代码或其他合法值）。
+    """
+    for item in catalog:
+        if item.get("friendlyName") == name:
+            return str(item.get("modelName") or name)
+    return name
+
+
 def extract_model_catalog(payload: dict[str, Any]) -> list[dict[str, Any]]:
     data = payload.get("data")
     if not isinstance(data, list):
@@ -49,14 +70,16 @@ def extract_model_catalog(payload: dict[str, Any]) -> list[dict[str, Any]]:
             model_name = str(model_item.get("modelName") or "").strip()
             if not model_name:
                 continue
+            model_display_name = str(
+                model_item.get("modelDisplayName") or model_name
+            )
             catalog.append(
                 {
                     "provider": provider,
                     "providerDisplayName": provider_display_name,
                     "modelName": model_name,
-                    "modelDisplayName": str(
-                        model_item.get("modelDisplayName") or model_name
-                    ),
+                    "modelDisplayName": model_display_name,
+                    "friendlyName": _display_name_to_friendly(model_display_name, provider),
                     "group": str(model_item.get("group") or "").strip(),
                     "multimodal": bool(model_item.get("multimodal", False)),
                     "visible": bool(model_item.get("visible", False)),
@@ -67,6 +90,8 @@ def extract_model_catalog(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     "iaiTag": model_item.get("iaiTag"),
                     "empId": model_item.get("empId"),
                     "priceApiType": model_item.get("priceApiType"),
+                    "reasoningEfforts": model_item.get("reasoningEfforts"),
+                    "defaultReasoningEffort": model_item.get("defaultReasoningEffort"),
                 }
             )
 
@@ -74,7 +99,7 @@ def extract_model_catalog(payload: dict[str, Any]) -> list[dict[str, Any]]:
         key=lambda item: (
             str(item.get("provider") or ""),
             0 if bool(item.get("visible")) else 1,
-            str(item.get("modelName") or ""),
+            str(item.get("friendlyName") or item.get("modelName") or ""),
         )
     )
     return catalog
@@ -85,6 +110,7 @@ def list_model_names(
     *,
     provider: str | None = None,
 ) -> set[str]:
+    """返回目录中所有可用的模型名称，包含友好名称和内部代码两种形式。"""
     provider_key = str(provider or "").strip().lower()
     names: set[str] = set()
     for item in catalog:
@@ -93,16 +119,23 @@ def list_model_names(
         model_name = str(item.get("modelName") or "").strip()
         if model_name:
             names.add(model_name)
+        friendly = str(item.get("friendlyName") or "").strip()
+        if friendly:
+            names.add(friendly)
     return names
 
 
 def list_proxy_model_names(catalog: list[dict[str, Any]]) -> set[str]:
+    """返回可作为代理目标的模型名称（排除图片生成模型），包含友好名称和内部代码。"""
     names: set[str] = set()
     for item in catalog:
         model_name = normalize_model_name(item.get("modelName"))
         if not model_name or is_image_generation_model(model_name):
             continue
         names.add(model_name)
+        friendly = str(item.get("friendlyName") or "").strip()
+        if friendly:
+            names.add(friendly)
     return names
 
 
@@ -118,13 +151,16 @@ def build_gemini_model_payload_from_catalog(
         if str(item.get("provider") or "").strip().lower() != "gemini":
             continue
         candidate_name = normalize_gemini_model_name(item.get("modelName"))
-        if candidate_name != normalized_target:
+        friendly_name = str(item.get("friendlyName") or "").strip()
+        # 同时支持内部代码和友好名称匹配
+        if candidate_name != normalized_target and friendly_name != normalized_target:
             continue
         context_window = _as_int(item.get("contextWindow"), 0)
         output_limit = 8192 if is_image_generation_model(candidate_name) else 16384
+        exposed_name = friendly_name or candidate_name
         return {
-            "name": f"models/{candidate_name}",
-            "baseModelId": candidate_name,
+            "name": f"models/{exposed_name}",
+            "baseModelId": exposed_name,
             "displayName": str(item.get("modelDisplayName") or candidate_name),
             "description": f"{str(item.get('providerDisplayName') or 'Gemini')} 动态模型",
             "inputTokenLimit": context_window or 1_000_000,
@@ -148,7 +184,7 @@ def build_openai_models_payload_from_catalog(
         "object": "list",
         "data": [
             {
-                "id": str(item.get("modelName") or ""),
+                "id": str(item.get("friendlyName") or item.get("modelName") or ""),
                 "object": "model",
                 "owned_by": str(item.get("provider") or "unknown"),
                 "display_name": str(item.get("modelDisplayName") or ""),
