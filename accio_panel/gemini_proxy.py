@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from typing import Any
 from typing import Callable
@@ -321,18 +322,12 @@ def build_accio_request_from_gemini(
     body: dict[str, Any],
     *,
     model: str,
-    token: str,
-    utdid: str,
-    version: str,
 ) -> dict[str, Any]:
     generation_config = body.get("generationConfig", body.get("generation_config"))
     if not isinstance(generation_config, dict):
         generation_config = {}
 
     request_body: dict[str, Any] = {
-        "utdid": utdid,
-        "version": version,
-        "token": token,
         "empid": str(body.get("empid") or ""),
         "tenant": str(body.get("tenant") or ""),
         "iai_tag": str(body.get("iai_tag", body.get("iaiTag")) or ""),
@@ -341,7 +336,7 @@ def build_accio_request_from_gemini(
         "request_id": str(
             body.get("request_id")
             or body.get("requestId")
-            or f"req-{uuid.uuid4()}"
+            or f"user-{int(time.time() * 1000)}"
         ),
         "message_id": str(body.get("message_id", body.get("messageId")) or ""),
         "incremental": True,

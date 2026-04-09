@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from typing import Any
 from typing import Callable
@@ -128,15 +129,8 @@ def anthropic_error_payload(
 
 def build_accio_request(
     body: dict[str, Any],
-    *,
-    token: str,
-    utdid: str,
-    version: str,
 ) -> dict[str, Any]:
     request_body: dict[str, Any] = {
-        "utdid": utdid,
-        "version": version,
-        "token": token,
         "empid": str(body.get("empid") or ""),
         "tenant": str(body.get("tenant") or ""),
         "iai_tag": str(body.get("iai_tag", body.get("iaiTag")) or ""),
@@ -145,7 +139,7 @@ def build_accio_request(
         "request_id": str(
             body.get("request_id")
             or body.get("requestId")
-            or f"req-{uuid.uuid4()}"
+            or f"user-{int(time.time() * 1000)}"
         ),
         "message_id": str(body.get("message_id", body.get("messageId")) or ""),
         "incremental": True,

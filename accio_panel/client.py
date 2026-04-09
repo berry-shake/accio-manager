@@ -172,12 +172,39 @@ class AccioClient:
             "POST",
             f"{self.settings.base_url}/api/auth/userinfo",
             json=self._build_activation_body(account),
-            headers=self.get_headers(
-                account.utdid,
-                accept="*/*",
-                cna=self._extract_cookie_value(account.cookie, "cna"),
-                user_agent="node",
-            ),
+            headers={
+                **self.get_headers(
+                    account.utdid,
+                    accept="*/*",
+                    cna=self._extract_cookie_value(account.cookie, "cna"),
+                    user_agent="node",
+                ),
+                "accept-language": "*",
+                "sec-fetch-mode": "cors",
+            },
+            proxy_url=proxy_url,
+        )
+
+    def check_user_allowed(
+        self,
+        account: Account,
+        *,
+        proxy_url: str | None = None,
+    ) -> dict[str, Any]:
+        return self._request_json(
+            "POST",
+            f"{self.settings.base_url}/api/vps/checkUserAllowed",
+            json=self._build_activation_body(account),
+            headers={
+                **self.get_headers(
+                    account.utdid,
+                    accept="*/*",
+                    cna=self._extract_cookie_value(account.cookie, "cna"),
+                    user_agent="node",
+                ),
+                "accept-language": "*",
+                "sec-fetch-mode": "cors",
+            },
             proxy_url=proxy_url,
         )
 
@@ -226,7 +253,7 @@ class AccioClient:
     ) -> dict[str, Any]:
         return self._request_json(
             "POST",
-            f"{self.settings.base_url}/api/llm/config",
+            f"{self.settings.base_url}/api/llm/config/v2",
             json={"token": account.access_token},
             headers={
                 "content-type": "application/json",
@@ -245,10 +272,12 @@ class AccioClient:
         userinfo = self.query_userinfo(account, proxy_url=proxy_url)
         invitation = self.query_invitation(account, proxy_url=proxy_url)
         channel = self.query_channel(account, proxy_url=proxy_url)
+        user_allowed = self.check_user_allowed(account, proxy_url=proxy_url)
 
         userinfo_success = bool(userinfo.get("success"))
         invitation_success = bool(invitation.get("success"))
         channel_success = bool(channel.get("success"))
+        user_allowed_success = bool(user_allowed.get("success"))
         required_success = userinfo_success and invitation_success
 
         if required_success and channel_success:
@@ -260,6 +289,7 @@ class AccioClient:
 
         userinfo_data = userinfo.get("data") if isinstance(userinfo.get("data"), dict) else {}
         channel_data = channel.get("data") if isinstance(channel.get("data"), dict) else {}
+        user_allowed_data = user_allowed.get("data") if isinstance(user_allowed.get("data"), dict) else {}
 
         return {
             "success": required_success,
@@ -267,6 +297,7 @@ class AccioClient:
             "userName": str(userinfo_data.get("userName") or ""),
             "userId": str(userinfo_data.get("userId") or ""),
             "accioId": str(userinfo_data.get("accioId") or ""),
+            "userAllowed": bool(user_allowed_data.get("allowed", False)),
             "invitationGranted": invitation.get("data"),
             "channelAuthorizations": channel_data.get("authorizations")
             if isinstance(channel_data.get("authorizations"), list)
@@ -298,6 +329,15 @@ class AccioClient:
                     "code": str(channel.get("code") or ""),
                     "data": channel.get("data"),
                 },
+                {
+                    "key": "user_allowed",
+                    "label": "用户权限",
+                    "success": user_allowed_success,
+                    "optional": True,
+                    "message": str(user_allowed.get("message") or ""),
+                    "code": str(user_allowed.get("code") or ""),
+                    "data": user_allowed.get("data"),
+                },
             ],
         }
 
@@ -316,6 +356,9 @@ class AccioClient:
                 "Accept": "text/event-stream",
                 "utdid": account.utdid,
                 "version": self.settings.version,
+                "appKey": self.settings.app_key,
+                "accept-language": "*",
+                "sec-fetch-mode": "cors",
                 "user-agent": "node",
             },
             proxies=self.get_proxies(proxy_url),

@@ -165,6 +165,15 @@ def _activate_callback_account(
     )
 
 
+def _is_default_account_name(name: str) -> bool:
+    """返回 True 表示该账号名是自动生成的默认名（如"账号1"），可以被真实用户名覆盖。"""
+    if not name or name == "未命名账号":
+        return True
+    if name.startswith("账号") and name[2:].isdigit():
+        return True
+    return False
+
+
 def _activation_summary_text(activation: dict[str, Any]) -> str:
     message = str(activation.get("message") or "").strip()
     if message:
@@ -189,6 +198,10 @@ def _import_callback_account(
         cookie=cookie,
     )
     activation = _activate_callback_account(client, account, panel_settings)
+    user_name = str(activation.get("userName") or "").strip()
+    if user_name and _is_default_account_name(account.name):
+        account.name = user_name
+        store.save(account)
     account, quota = _query_quota_with_refresh_fallback(
         store,
         client,
@@ -1514,9 +1527,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         accio_body = build_accio_request_from_gemini(
             payload,
             model=normalized_model_name,
-            token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
         )
         request_id = str(accio_body.get("request_id") or "")
 
@@ -2032,9 +2042,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         accio_body = build_accio_request_from_gemini(
             payload,
             model=model_name,
-            token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
         )
         request_id = str(accio_body.get("request_id") or "")
 
@@ -2305,12 +2312,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 code="proxy_selection_failed",
             )
 
-        accio_body = build_accio_request_from_openai(
-            chat_payload,
-            token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
-        )
+        accio_body = build_accio_request_from_openai(chat_payload)
         request_id = str(accio_body.get("request_id") or "")
 
         try:
@@ -2646,12 +2648,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 code="proxy_selection_failed",
             )
 
-        accio_body = build_accio_request_from_openai(
-            payload,
-            token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
-        )
+        accio_body = build_accio_request_from_openai(payload)
         request_id = str(accio_body.get("request_id") or "")
 
         try:
@@ -2988,12 +2985,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             return _anthropic_error_response(exc.status_code, exc.message)
 
-        accio_body = build_accio_request(
-            payload,
-            token=account.access_token,
-            utdid=account.utdid,
-            version=_effective_version(),
-        )
+        accio_body = build_accio_request(payload)
         request_id = str(accio_body.get("request_id") or "")
 
         try:
